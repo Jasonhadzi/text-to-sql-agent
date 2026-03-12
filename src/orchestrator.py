@@ -216,6 +216,12 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
     )
     synth_result = await Runner.run(synthesis_agent, synthesis_input)
     final: FinalResponse = synth_result.final_output
+
+    # Attach structured data from execution so the API can surface
+    # grounded tables/charts to the frontend.
+    final.preview_rows = preview_rows
+    final.columns = exec_result.columns
+
     logger.log("synthesis", "completed", final)
     logger.save_artifact("final.md", _format_final_md(final))
     logger.save_json_artifact("final.json", final)

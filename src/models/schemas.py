@@ -161,6 +161,8 @@ class FinalResponse(BaseModel):
     execution_summary: str = ""
     analysis: str = ""
     answer: str = ""
+    preview_rows: list[dict[str, Any]] = Field(default_factory=list)
+    columns: list[ColumnInfo] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

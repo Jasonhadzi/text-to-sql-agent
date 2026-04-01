@@ -33,3 +33,4 @@ Thumbs.db
 !README.md
 !ARCHITECTURE_AT_A_GLANCE.md
 !IMPLEMENTATION_PLAN.md
+!src/prompts/*.md

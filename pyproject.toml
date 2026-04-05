@@ -13,6 +13,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio"]
+fabric = ["pyodbc"]
+azure = ["openai"]
 
 [build-system]
 requires = ["setuptools>=68.0"]

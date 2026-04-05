@@ -154,6 +154,49 @@ class AnalysisReport(BaseModel):
     suggested_next_questions: list[str] = Field(default_factory=list)
 
 
+class ClarificationResult(BaseModel):
+    """Output of the Clarification Agent."""
+    is_clear: bool = True
+    clarifying_question: str = ""
+    original_question: str = ""
+    interpreted_intent: str = ""
+    confidence: float = 1.0
+
+
+class RoutingResult(BaseModel):
+    """Output of the Query Router Agent."""
+    relevant_tables: list[str] = Field(default_factory=list)
+    datasource: str = "default"
+    reasoning: str = ""
+    schema_subset: str = ""
+
+
+class AnomalyItem(BaseModel):
+    """A single detected anomaly."""
+    metric: str
+    expected_range: str = ""
+    actual_value: str = ""
+    deviation_pct: float = 0.0
+    description: str = ""
+
+
+class TrendItem(BaseModel):
+    """A single detected trend."""
+    metric: str
+    direction: str = ""
+    period: str = ""
+    description: str = ""
+
+
+class AnomalyReport(BaseModel):
+    """Output of the Anomaly/Insight Agent."""
+    anomalies: list[AnomalyItem] = Field(default_factory=list)
+    trends: list[TrendItem] = Field(default_factory=list)
+    summary: str = ""
+    severity: str = "info"  # info | warning | critical
+    recommended_queries: list[str] = Field(default_factory=list)
+
+
 class FinalResponse(BaseModel):
     question: str
     business_context_summary: str = ""
@@ -161,6 +204,7 @@ class FinalResponse(BaseModel):
     execution_summary: str = ""
     analysis: str = ""
     answer: str = ""
+    needs_clarification: bool = False
     preview_rows: list[dict[str, Any]] = Field(default_factory=list)
     columns: list[ColumnInfo] = Field(default_factory=list)
 

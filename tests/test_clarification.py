@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from src.agents.clarification_agent import clarification_agent
+from src.agents.clarification import clarification_agent
 from src.models.schemas import ClarificationDecision
 from src.prompts import load_prompt
 

@@ -12,20 +12,42 @@ from src.models.schemas import QueryRoute
 from src.prompts import load_prompt
 
 
+def _config_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "config" / "datasource_config.json"
+
+
 def _load_datasource_tables() -> list[str]:
-    """Read available table names from config/datasource_config.json."""
-    config_path = Path(__file__).resolve().parents[2] / "config" / "datasource_config.json"
-    with config_path.open("r", encoding="utf-8") as f:
+    """Read available table names from src/config/datasource_config.json."""
+    path = _config_path()
+    with path.open("r", encoding="utf-8") as f:
         config = json.load(f)
 
-    tables = config.get("tables", [])
     names: list[str] = []
-    for table in tables:
+
+    for table in config.get("tables", []):
         if isinstance(table, dict):
             name = table.get("name")
             if isinstance(name, str) and name.strip():
                 names.append(name.strip())
-    return names
+
+    for ds in config.get("datasources", []):
+        if not isinstance(ds, dict):
+            continue
+        for table in ds.get("tables", []):
+            if isinstance(table, dict):
+                name = table.get("name")
+                if isinstance(name, str) and name.strip():
+                    names.append(name.strip())
+            elif isinstance(table, str) and table.strip():
+                names.append(table.strip())
+
+    seen: set[str] = set()
+    unique: list[str] = []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            unique.append(n)
+    return unique
 
 
 def _build_router_instructions() -> str:

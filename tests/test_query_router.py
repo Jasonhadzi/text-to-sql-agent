@@ -1,6 +1,6 @@
 """Tests for query router config loading and prompt wiring."""
 
-from src.agents.query_router_agent import _build_router_instructions, _load_datasource_tables, query_router_agent
+from src.agents.query_router import _build_router_instructions, _load_datasource_tables, query_router_agent
 from src.models.schemas import QueryRoute
 
 

@@ -3,25 +3,16 @@
 from __future__ import annotations
 
 import json
-import re
 from uuid import uuid4
 
 from agents import Runner
 
-from src.agents.business_context import business_context_agent
-from src.agents.technical_spec import technical_spec_agent
-from src.agents.sql_writer import sql_writer_agent
-from src.agents.sql_evaluator import sql_evaluator_agent
-from src.agents.analysis import analysis_agent
-from src.agents.synthesis import synthesis_agent
+from src.agents.nlq_agent import nlq_agent
+from src.agents.rag_agent import rag_agent
+from src.guardrails.input_guardrail import check_input_safety
 from src.models.schemas import (
-    AnalysisReport,
-    BusinessContext,
     FinalResponse,
     SQLCandidate,
-    SchemaSummary,
-    TechnicalSpec,
-    ValidationResult,
 )
 from src.tools.redact import redact_preview
 from src.tools.run_logger import RunLogger
@@ -52,10 +43,10 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
     schema_text = schema.format_for_prompt()
 
     # ------------------------------------------------------------------
-    # Stage 1 — Input safety check (basic deterministic)
+    # Stage 1 — Input safety check (deterministic guardrail)
     # ------------------------------------------------------------------
     print("[Stage 1] Checking input safety...")
-    safety_issues = _check_input_safety(question)
+    safety_issues = check_input_safety(question)
     if safety_issues:
         logger.log("safety", "flagged", {"issues": safety_issues})
         print(f"  [WARN] Safety flags: {safety_issues}")
@@ -63,73 +54,32 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
         logger.log("safety", "passed", {})
 
     # ------------------------------------------------------------------
-    # Stage 1b — Business context (LLM)
-    # ------------------------------------------------------------------
-    print("[Stage 1b] Extracting business context...")
-    biz_input = (
-        f"## User Question\n{question}\n\n"
-        f"## Database Schema\n{schema_text}"
-    )
-    biz_result = await Runner.run(business_context_agent, biz_input)
-    biz_ctx: BusinessContext = biz_result.final_output
-    logger.log("business_context", "completed", biz_ctx)
-    logger.save_json_artifact("business_context.json", biz_ctx)
-    print(f"  Business goal: {biz_ctx.business_goal}")
-
-    # ------------------------------------------------------------------
-    # Stage 2 — Technical spec (LLM, sequential)
-    # ------------------------------------------------------------------
-    print("[Stage 2] Generating technical specification...")
-    tech_input = (
-        f"## User Question\n{question}\n\n"
-        f"## Business Context\n{json.dumps(biz_ctx.model_dump(), indent=2)}\n\n"
-        f"## Database Schema\n{schema_text}"
-    )
-    tech_result = await Runner.run(technical_spec_agent, tech_input)
-    tech_spec: TechnicalSpec = tech_result.final_output
-    logger.log("technical_spec", "completed", tech_spec)
-    logger.save_json_artifact("technical_spec.json", tech_spec)
-    print(f"  Task: {tech_spec.task}")
-
-    # ------------------------------------------------------------------
-    # Stage 3 + 4 — SQL generation + validation loop
+    # Stage 2 — NLQ Agent: question → SQL (with retry loop)
     # ------------------------------------------------------------------
     validated_sql: str | None = None
     errors_feedback: str = ""
 
     for attempt in range(MAX_SQL_ATTEMPTS):
-        print(f"[Stage 3] Writing SQL (attempt {attempt + 1}/{MAX_SQL_ATTEMPTS})...")
+        print(f"[Stage 2] NLQ Agent generating SQL (attempt {attempt + 1}/{MAX_SQL_ATTEMPTS})...")
 
-        sql_input = (
-            f"## Technical Specification\n{json.dumps(tech_spec.model_dump(), indent=2)}\n\n"
+        nlq_input = (
+            f"## User Question\n{question}\n\n"
             f"## Database Schema\n{schema_text}"
         )
         if errors_feedback:
-            sql_input += (
+            nlq_input += (
                 f"\n\n## Previous Validation Errors — Fix These\n{errors_feedback}"
             )
 
-        sql_result = await Runner.run(sql_writer_agent, sql_input)
-        sql_candidate: SQLCandidate = sql_result.final_output
-        logger.log("sql_writer", f"attempt_{attempt}", sql_candidate)
+        nlq_result = await Runner.run(nlq_agent, nlq_input)
+        sql_candidate: SQLCandidate = nlq_result.final_output
+        logger.log("nlq_agent", f"attempt_{attempt}", sql_candidate)
         print(f"  SQL: {sql_candidate.sql[:120]}...")
 
-        # ---- Deterministic validation ----
-        print(f"[Stage 4] Validating SQL (attempt {attempt + 1})...")
+        # ---- Deterministic SQL validation (hard gate) ----
+        print(f"[Stage 3] Validating SQL (attempt {attempt + 1})...")
         det_val = validate_sql(sql_candidate.sql, schema)
         logger.log("validation_deterministic", f"attempt_{attempt}", det_val)
-
-        # ---- LLM advisory validation (run even if deterministic passes) ----
-        eval_input = (
-            f"## User Question\n{question}\n\n"
-            f"## Technical Specification\n{json.dumps(tech_spec.model_dump(), indent=2)}\n\n"
-            f"## Proposed SQL\n```sql\n{sql_candidate.sql}\n```\n\n"
-            f"## Database Schema\n{schema_text}\n\n"
-            f"## Engine Constraints\nDuckDB dialect. Only table retail_transactions_typed allowed. SELECT only."
-        )
-        eval_result = await Runner.run(sql_evaluator_agent, eval_input)
-        llm_eval: ValidationResult = eval_result.final_output
-        logger.log("validation_llm", f"attempt_{attempt}", llm_eval)
 
         if det_val.has_blockers:
             blocker_msgs = [i.message for i in det_val.issues if i.severity == "blocker"]
@@ -157,9 +107,9 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
         )
 
     # ------------------------------------------------------------------
-    # Stage 5 — Execute
+    # Stage 4 — Execute SQL
     # ------------------------------------------------------------------
-    print("[Stage 5] Executing SQL...")
+    print("[Stage 4] Executing SQL...")
     try:
         exec_result = execute_sql(conn, validated_sql, run_id)
     except Exception as exc:
@@ -181,48 +131,25 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
     preview_rows = redact_preview(exec_result.preview_rows, schema.pii_columns)
 
     # ------------------------------------------------------------------
-    # Stage 6a — Analysis (LLM)
+    # Stage 5 — RAG Agent: results → grounded answer
     # ------------------------------------------------------------------
-    print("[Stage 6a] Generating analysis report...")
-    analysis_input = (
+    print("[Stage 5] RAG Agent generating answer...")
+    rag_input = (
         f"## User Question\n{question}\n\n"
-        f"## Business Context\n{json.dumps(biz_ctx.model_dump(), indent=2)}\n\n"
-        f"## SQL Query\n```sql\n{validated_sql}\n```\n\n"
-        f"## Query Results ({exec_result.row_count} rows, {exec_result.execution_ms}ms)\n"
-        f"### Preview (first {len(preview_rows)} rows)\n"
-        f"```json\n{json.dumps(preview_rows, indent=2, default=str)}\n```"
-    )
-    analysis_result = await Runner.run(analysis_agent, analysis_input)
-    report: AnalysisReport = analysis_result.final_output
-    logger.log("analysis", "completed", report)
-    logger.save_json_artifact("analysis.json", report)
-    print(f"  Executive summary: {report.executive_summary[:1] if report.executive_summary else '(empty)'}...")
-
-    # ------------------------------------------------------------------
-    # Stage 6b — Synthesis (LLM)
-    # ------------------------------------------------------------------
-    print("[Stage 6b] Synthesizing final response...")
-    synthesis_input = (
-        f"## Original Question\n{question}\n\n"
-        f"## Business Context Summary\n{biz_ctx.business_goal}\n\n"
         f"## SQL Query\n```sql\n{validated_sql}\n```\n\n"
         f"## Execution Summary\n{exec_result.row_count} rows returned in {exec_result.execution_ms}ms\n\n"
-        f"## Results Preview\n```json\n{json.dumps(preview_rows, indent=2, default=str)}\n```\n\n"
-        f"## Analysis Report\n"
-        f"### Executive Summary\n" + "\n".join(f"- {s}" for s in report.executive_summary) + "\n\n"
-        f"### Key Findings\n" + "\n".join(f"- {f}" for f in report.key_findings) + "\n\n"
-        f"### Caveats\n" + "\n".join(f"- {c}" for c in report.caveats) + "\n\n"
-        f"### Suggested Next Questions\n" + "\n".join(f"- {q}" for q in report.suggested_next_questions)
+        f"## Results Preview (first {len(preview_rows)} rows)\n"
+        f"```json\n{json.dumps(preview_rows, indent=2, default=str)}\n```"
     )
-    synth_result = await Runner.run(synthesis_agent, synthesis_input)
-    final: FinalResponse = synth_result.final_output
+    rag_result = await Runner.run(rag_agent, rag_input)
+    final: FinalResponse = rag_result.final_output
 
     # Attach structured data from execution so the API can surface
     # grounded tables/charts to the frontend.
     final.preview_rows = preview_rows
     final.columns = exec_result.columns
 
-    logger.log("synthesis", "completed", final)
+    logger.log("rag_agent", "completed", final)
     logger.save_artifact("final.md", _format_final_md(final))
     logger.save_json_artifact("final.json", final)
 
@@ -234,27 +161,6 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-_SUSPICIOUS_PATTERNS = [
-    r"ignore\s+(previous|above|all)\s+instructions",
-    r"drop\s+table",
-    r"delete\s+from",
-    r"insert\s+into",
-    r"update\s+\w+\s+set",
-    r";\s*(drop|delete|insert|update|alter|create)",
-    r"exfiltrate",
-    r"run\s+tool",
-]
-
-
-def _check_input_safety(question: str) -> list[str]:
-    """Basic deterministic prompt-injection screening."""
-    flags: list[str] = []
-    lower = question.lower()
-    for pattern in _SUSPICIOUS_PATTERNS:
-        if re.search(pattern, lower):
-            flags.append(f"Suspicious pattern: {pattern}")
-    return flags
 
 
 def _format_final_md(resp: FinalResponse) -> str:

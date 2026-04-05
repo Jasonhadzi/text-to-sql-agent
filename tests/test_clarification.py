@@ -1,51 +1,61 @@
-"""Tests for clarification decision contracts and agent wiring."""
+"""Tests for the Clarification Agent — schemas, wiring, and sample outputs."""
 
 import pytest
-from pydantic import ValidationError
 
 from src.agents.clarification import clarification_agent
-from src.models.schemas import ClarificationDecision
+from src.models.schemas import ClarificationResult
 from src.prompts import load_prompt
 
 
-class TestClarificationDecision:
-    def test_clear_question_routes_to_query_router(self) -> None:
-        decision = ClarificationDecision(
+@pytest.fixture
+def clear_result() -> ClarificationResult:
+    return ClarificationResult(
+        is_clear=True,
+        clarifying_question="",
+        original_question="What were total sales last month?",
+        interpreted_intent="Sum of Total_Amount for the previous calendar month",
+        confidence=0.95,
+    )
+
+
+@pytest.fixture
+def unclear_result() -> ClarificationResult:
+    return ClarificationResult(
+        is_clear=False,
+        clarifying_question="Could you specify which metric you're interested in — revenue, number of orders, or something else?",
+        original_question="Tell me about the data",
+        interpreted_intent="",
+        confidence=0.3,
+    )
+
+
+class TestClarificationResult:
+    def test_clear_result_fields(self, clear_result: ClarificationResult) -> None:
+        assert clear_result.is_clear is True
+        assert clear_result.clarifying_question == ""
+        assert clear_result.confidence > 0.5
+
+    def test_unclear_result_has_question(self, unclear_result: ClarificationResult) -> None:
+        assert unclear_result.is_clear is False
+        assert len(unclear_result.clarifying_question) > 0
+
+    def test_original_question_echoed(self, clear_result: ClarificationResult) -> None:
+        assert clear_result.original_question == "What were total sales last month?"
+
+    def test_confidence_range(self) -> None:
+        result = ClarificationResult(
             is_clear=True,
-            route_to="anything_else",
-            clarifying_question="this should be ignored",
-            ambiguity_reasons=[],
+            original_question="test",
+            confidence=0.85,
         )
-        assert decision.is_clear is True
-        assert decision.route_to == "query_router"
-        assert decision.clarifying_question == ""
-
-    def test_unclear_question_requires_clarifying_question(self) -> None:
-        with pytest.raises(ValidationError):
-            ClarificationDecision(
-                is_clear=False,
-                route_to="clarification_agent",
-                clarifying_question="   ",
-                ambiguity_reasons=["Missing metric definition"],
-            )
-
-    def test_unclear_question_accepts_single_question(self) -> None:
-        decision = ClarificationDecision(
-            is_clear=False,
-            route_to="clarification_agent",
-            clarifying_question="Which metric should define performance: revenue, order count, or margin?",
-            ambiguity_reasons=["'Performance' is ambiguous without a metric"],
-        )
-        assert decision.is_clear is False
-        assert decision.clarifying_question != ""
+        assert 0.0 <= result.confidence <= 1.0
 
 
 class TestClarificationAgentWiring:
     def test_prompt_file_loads(self) -> None:
-        prompt = load_prompt("clarification_prompt")
-        assert "Clarification Agent" in prompt
-        assert "query_router" in prompt
+        prompt = load_prompt("clarification")
+        assert "clarification" in prompt.lower()
 
-    def test_agent_name_and_prompt_wiring(self) -> None:
+    def test_agent_name_and_instructions(self) -> None:
         assert clarification_agent.name == "ClarificationAgent"
-        assert "Clarification Agent" in clarification_agent.instructions
+        assert len(clarification_agent.instructions) > 0

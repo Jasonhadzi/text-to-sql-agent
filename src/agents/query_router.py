@@ -1,4 +1,9 @@
-"""QueryRouterAgent — selects relevant tables from datasource config."""
+"""Query Router Agent — dynamically routes to correct tables/data source.
+
+Given a clear question, reads datasource config and decides which tables are relevant.
+Returns a list of relevant tables to the NLQ Agent. Table names are loaded from
+``src/config/datasource_config.json`` at instruction build time (not hardcoded in code).
+"""
 
 from __future__ import annotations
 
@@ -8,7 +13,7 @@ from pathlib import Path
 from agents import Agent, ModelSettings
 from agents.agent_output import AgentOutputSchema
 
-from src.models.schemas import QueryRoute
+from src.models.schemas import RoutingResult
 from src.prompts import load_prompt
 
 
@@ -17,7 +22,7 @@ def _config_path() -> Path:
 
 
 def _load_datasource_tables() -> list[str]:
-    """Read available table names from src/config/datasource_config.json."""
+    """Collect table names from datasource_config.json (top-level ``tables`` and ``datasources``)."""
     path = _config_path()
     with path.open("r", encoding="utf-8") as f:
         config = json.load(f)
@@ -51,16 +56,20 @@ def _load_datasource_tables() -> list[str]:
 
 
 def _build_router_instructions() -> str:
-    base_prompt = load_prompt("query_router_prompt")
+    base = load_prompt("query_router")
     table_names = _load_datasource_tables()
     table_block = "\n".join(f"- {name}" for name in table_names) or "- (no tables found)"
-    return f"{base_prompt}\n\n## Available Tables (from datasource_config.json)\n{table_block}\n"
+    return (
+        f"{base}\n\n"
+        f"## Dynamically loaded table names (from datasource_config.json)\n"
+        f"{table_block}\n"
+    )
 
 
 query_router_agent = Agent(
     name="QueryRouterAgent",
     instructions=_build_router_instructions(),
     model="gpt-4o-mini",
-    output_type=AgentOutputSchema(QueryRoute, strict_json_schema=False),
+    output_type=AgentOutputSchema(RoutingResult, strict_json_schema=False),
     model_settings=ModelSettings(temperature=0),
 )

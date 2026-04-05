@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
@@ -86,28 +86,6 @@ class BusinessContext(BaseModel):
     assumptions: list[str] = Field(default_factory=list)
 
 
-class ClarificationDecision(BaseModel):
-    is_clear: bool = True
-    route_to: str = "query_router"
-    clarifying_question: str = ""
-    ambiguity_reasons: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def _validate_decision(self) -> "ClarificationDecision":
-        if self.is_clear:
-            self.route_to = "query_router"
-            self.clarifying_question = ""
-        elif not self.clarifying_question.strip():
-            raise ValueError("clarifying_question is required when is_clear is false")
-        return self
-
-
-class QueryRoute(BaseModel):
-    relevant_tables: list[str] = Field(default_factory=list)
-    reasoning: str = ""
-    confidence: float = 0.0
-
-
 class SelectExpression(BaseModel):
     expression: str
     alias: str | None = None
@@ -176,6 +154,49 @@ class AnalysisReport(BaseModel):
     suggested_next_questions: list[str] = Field(default_factory=list)
 
 
+class ClarificationResult(BaseModel):
+    """Output of the Clarification Agent."""
+    is_clear: bool = True
+    clarifying_question: str = ""
+    original_question: str = ""
+    interpreted_intent: str = ""
+    confidence: float = 1.0
+
+
+class RoutingResult(BaseModel):
+    """Output of the Query Router Agent."""
+    relevant_tables: list[str] = Field(default_factory=list)
+    datasource: str = "default"
+    reasoning: str = ""
+    schema_subset: str = ""
+
+
+class AnomalyItem(BaseModel):
+    """A single detected anomaly."""
+    metric: str
+    expected_range: str = ""
+    actual_value: str = ""
+    deviation_pct: float = 0.0
+    description: str = ""
+
+
+class TrendItem(BaseModel):
+    """A single detected trend."""
+    metric: str
+    direction: str = ""
+    period: str = ""
+    description: str = ""
+
+
+class AnomalyReport(BaseModel):
+    """Output of the Anomaly/Insight Agent."""
+    anomalies: list[AnomalyItem] = Field(default_factory=list)
+    trends: list[TrendItem] = Field(default_factory=list)
+    summary: str = ""
+    severity: str = "info"  # info | warning | critical
+    recommended_queries: list[str] = Field(default_factory=list)
+
+
 class FinalResponse(BaseModel):
     question: str
     business_context_summary: str = ""
@@ -183,6 +204,7 @@ class FinalResponse(BaseModel):
     execution_summary: str = ""
     analysis: str = ""
     answer: str = ""
+    needs_clarification: bool = False
     preview_rows: list[dict[str, Any]] = Field(default_factory=list)
     columns: list[ColumnInfo] = Field(default_factory=list)
 

@@ -2,10 +2,26 @@
 
 from __future__ import annotations
 
+import json
+import os
 from typing import Any
 
+_CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "config")
+
+
+def _load_pii_columns() -> set[str]:
+    """Load PII column names from config, with fallback to hardcoded defaults."""
+    try:
+        path = os.path.join(_CONFIG_DIR, "pii_config.json")
+        with open(path, "r") as f:
+            config = json.load(f)
+        return {c.lower() for c in config.get("pii_columns", [])}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"name", "email", "phone", "address"}
+
+
 # Default PII column names (case-insensitive matching)
-DEFAULT_PII_COLUMNS = {"name", "email", "phone", "address"}
+DEFAULT_PII_COLUMNS = _load_pii_columns()
 
 REDACTED = "[REDACTED]"
 

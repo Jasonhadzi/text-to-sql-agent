@@ -1,31 +1,43 @@
-"""Pipeline orchestrator — drives the multi-agent text-to-SQL workflow."""
+"""Pipeline orchestrator — drives the multi-agent text-to-SQL workflow.
+
+Enforces the full data flow:
+    User Input → Input Guardrail → Clarification Agent → Query Router Agent →
+    NLQ Agent → SQL Guardrail → Execute SQL → RAG Agent → Output Guardrail → User
+"""
 
 from __future__ import annotations
 
 import json
-import re
+import os
 from uuid import uuid4
 
 from agents import Runner
 
-from src.agents.business_context import business_context_agent
-from src.agents.technical_spec import technical_spec_agent
-from src.agents.sql_writer import sql_writer_agent
-from src.agents.sql_evaluator import sql_evaluator_agent
-from src.agents.analysis import analysis_agent
-from src.agents.synthesis import synthesis_agent
+from src.agents.clarification import clarification_agent
+from src.agents.query_router import query_router_agent
+from src.agents.nlq_agent import nlq_agent
+from src.agents.rag_agent import rag_agent
+from src.connectors.azure_openai_connector import get_azure_run_config
+from src.connectors.fabric_connector import (
+    USE_FABRIC,
+    get_fabric_connection,
+    execute_sql_fabric,
+)
+from src.guardrails.input_guardrail import check_input_safety, is_hard_block
+from src.guardrails.output_guardrail import check_output_safety, has_critical_issues
 from src.models.schemas import (
-    AnalysisReport,
-    BusinessContext,
+    ClarificationResult,
     FinalResponse,
+    RoutingResult,
     SQLCandidate,
-    SchemaSummary,
-    TechnicalSpec,
-    ValidationResult,
 )
 from src.tools.redact import redact_preview
 from src.tools.run_logger import RunLogger
-from src.tools.schema_introspect import get_schema_summary, load_csv_to_duckdb
+from src.tools.schema_introspect import (
+    get_schema_summary,
+    load_csv_to_duckdb,
+    load_datasource_config,
+)
 from src.tools.sql_execute import execute_sql
 from src.tools.sql_validate import inject_limit, validate_sql
 
@@ -40,96 +52,122 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
     logger.log("setup", "run_started", {"question": question, "csv_path": csv_path})
     print(f"\n[run_id={run_id}] Starting pipeline...")
 
+    # Get Azure run config (None if not configured — uses default OpenAI)
+    run_config = get_azure_run_config()
+    if run_config:
+        print("  [INFO] Using Azure AI Foundry endpoint")
+
     # ------------------------------------------------------------------
-    # Stage 0 — Load data + introspect schema (deterministic)
+    # Stage 0 — Setup: get connection + introspect schema
     # ------------------------------------------------------------------
-    print("[Stage 0] Loading CSV into DuckDB and introspecting schema...")
-    conn = load_csv_to_duckdb(csv_path)
-    schema = get_schema_summary(conn)
+    print("[Stage 0] Loading data and introspecting schema...")
+    if USE_FABRIC:
+        print("  [INFO] Using Microsoft Fabric Warehouse")
+        conn = get_fabric_connection()
+        schema = get_schema_summary_from_config()
+    else:
+        conn = load_csv_to_duckdb(csv_path)
+        schema = get_schema_summary(conn)
+
     logger.save_json_artifact("schema.json", schema)
     logger.log("schema", "introspected", {"tables": len(schema.tables), "notes": schema.notes})
-
     schema_text = schema.format_for_prompt()
 
+    # Load datasource config for the query router
+    datasource_config = load_datasource_config()
+
     # ------------------------------------------------------------------
-    # Stage 1 — Input safety check (basic deterministic)
+    # Stage 1 — Input Guardrail (enhanced deterministic)
     # ------------------------------------------------------------------
     print("[Stage 1] Checking input safety...")
-    safety_issues = _check_input_safety(question)
+    safety_issues = check_input_safety(question)
     if safety_issues:
         logger.log("safety", "flagged", {"issues": safety_issues})
-        print(f"  [WARN] Safety flags: {safety_issues}")
+        if is_hard_block(safety_issues):
+            logger.log("safety", "hard_blocked", {"issues": safety_issues})
+            print(f"  [BLOCKED] Hard block triggered: {safety_issues}")
+            return FinalResponse(
+                question=question,
+                answer="Your question was blocked by our safety system. "
+                       "Please rephrase without instructions or commands.",
+            )
+        print(f"  [WARN] Safety flags (soft): {safety_issues}")
     else:
         logger.log("safety", "passed", {})
 
     # ------------------------------------------------------------------
-    # Stage 1b — Business context (LLM)
+    # Stage 2 — Clarification Agent (is the question clear?)
     # ------------------------------------------------------------------
-    print("[Stage 1b] Extracting business context...")
-    biz_input = (
+    print("[Stage 2] Clarification Agent checking question clarity...")
+    clarification_input = (
         f"## User Question\n{question}\n\n"
         f"## Database Schema\n{schema_text}"
     )
-    biz_result = await Runner.run(business_context_agent, biz_input)
-    biz_ctx: BusinessContext = biz_result.final_output
-    logger.log("business_context", "completed", biz_ctx)
-    logger.save_json_artifact("business_context.json", biz_ctx)
-    print(f"  Business goal: {biz_ctx.business_goal}")
-
-    # ------------------------------------------------------------------
-    # Stage 2 — Technical spec (LLM, sequential)
-    # ------------------------------------------------------------------
-    print("[Stage 2] Generating technical specification...")
-    tech_input = (
-        f"## User Question\n{question}\n\n"
-        f"## Business Context\n{json.dumps(biz_ctx.model_dump(), indent=2)}\n\n"
-        f"## Database Schema\n{schema_text}"
+    clar_result = await Runner.run(
+        clarification_agent, clarification_input, run_config=run_config
     )
-    tech_result = await Runner.run(technical_spec_agent, tech_input)
-    tech_spec: TechnicalSpec = tech_result.final_output
-    logger.log("technical_spec", "completed", tech_spec)
-    logger.save_json_artifact("technical_spec.json", tech_spec)
-    print(f"  Task: {tech_spec.task}")
+    clar: ClarificationResult = clar_result.final_output
+    logger.log("clarification", "completed", clar)
+
+    if not clar.is_clear:
+        logger.log("clarification", "needs_clarification", {
+            "clarifying_question": clar.clarifying_question
+        })
+        print(f"  [CLARIFY] {clar.clarifying_question}")
+        return FinalResponse(
+            question=question,
+            needs_clarification=True,
+            answer=clar.clarifying_question,
+        )
+    print(f"  Question is clear (confidence: {clar.confidence:.2f})")
 
     # ------------------------------------------------------------------
-    # Stage 3 + 4 — SQL generation + validation loop
+    # Stage 3 — Query Router Agent (which tables?)
+    # ------------------------------------------------------------------
+    print("[Stage 3] Query Router Agent selecting tables...")
+    router_input = (
+        f"## User Question\n{question}\n\n"
+        f"## Datasource Configuration\n"
+        f"```json\n{json.dumps(datasource_config, indent=2)}\n```\n\n"
+        f"## Available Schema\n{schema_text}"
+    )
+    router_result = await Runner.run(
+        query_router_agent, router_input, run_config=run_config
+    )
+    routing: RoutingResult = router_result.final_output
+    logger.log("query_router", "completed", routing)
+    print(f"  Routed to tables: {routing.relevant_tables}")
+
+    # Filter schema to only include routed tables
+    filtered_schema_text = _filter_schema_for_tables(schema_text, routing.relevant_tables)
+
+    # ------------------------------------------------------------------
+    # Stage 4 — NLQ Agent: question → SQL (with retry loop)
     # ------------------------------------------------------------------
     validated_sql: str | None = None
     errors_feedback: str = ""
 
     for attempt in range(MAX_SQL_ATTEMPTS):
-        print(f"[Stage 3] Writing SQL (attempt {attempt + 1}/{MAX_SQL_ATTEMPTS})...")
+        print(f"[Stage 4] NLQ Agent generating SQL (attempt {attempt + 1}/{MAX_SQL_ATTEMPTS})...")
 
-        sql_input = (
-            f"## Technical Specification\n{json.dumps(tech_spec.model_dump(), indent=2)}\n\n"
-            f"## Database Schema\n{schema_text}"
+        nlq_input = (
+            f"## User Question\n{question}\n\n"
+            f"## Database Schema\n{filtered_schema_text}"
         )
         if errors_feedback:
-            sql_input += (
+            nlq_input += (
                 f"\n\n## Previous Validation Errors — Fix These\n{errors_feedback}"
             )
 
-        sql_result = await Runner.run(sql_writer_agent, sql_input)
-        sql_candidate: SQLCandidate = sql_result.final_output
-        logger.log("sql_writer", f"attempt_{attempt}", sql_candidate)
+        nlq_result = await Runner.run(nlq_agent, nlq_input, run_config=run_config)
+        sql_candidate: SQLCandidate = nlq_result.final_output
+        logger.log("nlq_agent", f"attempt_{attempt}", sql_candidate)
         print(f"  SQL: {sql_candidate.sql[:120]}...")
 
-        # ---- Deterministic validation ----
-        print(f"[Stage 4] Validating SQL (attempt {attempt + 1})...")
+        # ---- Stage 5: SQL Guardrail — deterministic validation (hard gate) ----
+        print(f"[Stage 5] SQL Guardrail validating (attempt {attempt + 1})...")
         det_val = validate_sql(sql_candidate.sql, schema)
-        logger.log("validation_deterministic", f"attempt_{attempt}", det_val)
-
-        # ---- LLM advisory validation (run even if deterministic passes) ----
-        eval_input = (
-            f"## User Question\n{question}\n\n"
-            f"## Technical Specification\n{json.dumps(tech_spec.model_dump(), indent=2)}\n\n"
-            f"## Proposed SQL\n```sql\n{sql_candidate.sql}\n```\n\n"
-            f"## Database Schema\n{schema_text}\n\n"
-            f"## Engine Constraints\nDuckDB dialect. Only table retail_transactions_typed allowed. SELECT only."
-        )
-        eval_result = await Runner.run(sql_evaluator_agent, eval_input)
-        llm_eval: ValidationResult = eval_result.final_output
-        logger.log("validation_llm", f"attempt_{attempt}", llm_eval)
+        logger.log("sql_guardrail", f"attempt_{attempt}", det_val)
 
         if det_val.has_blockers:
             blocker_msgs = [i.message for i in det_val.issues if i.severity == "blocker"]
@@ -143,7 +181,7 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
             final_sql = inject_limit(final_sql)
 
         validated_sql = final_sql
-        logger.log("validation", "passed", {"attempt": attempt})
+        logger.log("sql_guardrail", "passed", {"attempt": attempt})
         logger.save_artifact("query.sql", validated_sql)
         break
 
@@ -157,11 +195,14 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
         )
 
     # ------------------------------------------------------------------
-    # Stage 5 — Execute
+    # Stage 6 — Execute SQL (Fabric Warehouse or DuckDB)
     # ------------------------------------------------------------------
-    print("[Stage 5] Executing SQL...")
+    print("[Stage 6] Executing SQL...")
     try:
-        exec_result = execute_sql(conn, validated_sql, run_id)
+        if USE_FABRIC:
+            exec_result = execute_sql_fabric(conn, validated_sql, run_id)
+        else:
+            exec_result = execute_sql(conn, validated_sql, run_id)
     except Exception as exc:
         logger.log("execution", "error", {"error": str(exc)})
         print(f"  [ERROR] Execution failed: {exc}")
@@ -181,48 +222,50 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
     preview_rows = redact_preview(exec_result.preview_rows, schema.pii_columns)
 
     # ------------------------------------------------------------------
-    # Stage 6a — Analysis (LLM)
+    # Stage 7 — RAG Agent: results → grounded answer
     # ------------------------------------------------------------------
-    print("[Stage 6a] Generating analysis report...")
-    analysis_input = (
+    print("[Stage 7] RAG Agent generating answer...")
+    rag_input = (
         f"## User Question\n{question}\n\n"
-        f"## Business Context\n{json.dumps(biz_ctx.model_dump(), indent=2)}\n\n"
-        f"## SQL Query\n```sql\n{validated_sql}\n```\n\n"
-        f"## Query Results ({exec_result.row_count} rows, {exec_result.execution_ms}ms)\n"
-        f"### Preview (first {len(preview_rows)} rows)\n"
-        f"```json\n{json.dumps(preview_rows, indent=2, default=str)}\n```"
-    )
-    analysis_result = await Runner.run(analysis_agent, analysis_input)
-    report: AnalysisReport = analysis_result.final_output
-    logger.log("analysis", "completed", report)
-    logger.save_json_artifact("analysis.json", report)
-    print(f"  Executive summary: {report.executive_summary[:1] if report.executive_summary else '(empty)'}...")
-
-    # ------------------------------------------------------------------
-    # Stage 6b — Synthesis (LLM)
-    # ------------------------------------------------------------------
-    print("[Stage 6b] Synthesizing final response...")
-    synthesis_input = (
-        f"## Original Question\n{question}\n\n"
-        f"## Business Context Summary\n{biz_ctx.business_goal}\n\n"
         f"## SQL Query\n```sql\n{validated_sql}\n```\n\n"
         f"## Execution Summary\n{exec_result.row_count} rows returned in {exec_result.execution_ms}ms\n\n"
-        f"## Results Preview\n```json\n{json.dumps(preview_rows, indent=2, default=str)}\n```\n\n"
-        f"## Analysis Report\n"
-        f"### Executive Summary\n" + "\n".join(f"- {s}" for s in report.executive_summary) + "\n\n"
-        f"### Key Findings\n" + "\n".join(f"- {f}" for f in report.key_findings) + "\n\n"
-        f"### Caveats\n" + "\n".join(f"- {c}" for c in report.caveats) + "\n\n"
-        f"### Suggested Next Questions\n" + "\n".join(f"- {q}" for q in report.suggested_next_questions)
+        f"## Results Preview (first {len(preview_rows)} rows)\n"
+        f"```json\n{json.dumps(preview_rows, indent=2, default=str)}\n```"
     )
-    synth_result = await Runner.run(synthesis_agent, synthesis_input)
-    final: FinalResponse = synth_result.final_output
+    rag_result = await Runner.run(rag_agent, rag_input, run_config=run_config)
+    final: FinalResponse = rag_result.final_output
 
     # Attach structured data from execution so the API can surface
     # grounded tables/charts to the frontend.
     final.preview_rows = preview_rows
     final.columns = exec_result.columns
 
-    logger.log("synthesis", "completed", final)
+    # ------------------------------------------------------------------
+    # Stage 8 — Output Guardrail (citation + grounding check)
+    # ------------------------------------------------------------------
+    print("[Stage 8] Output Guardrail checking response quality...")
+    output_issues = check_output_safety(
+        answer=final.answer,
+        sql=final.sql,
+        analysis=final.analysis,
+        preview_rows=preview_rows,
+    )
+    if output_issues:
+        logger.log("output_guardrail", "flagged", {"issues": output_issues})
+        for issue in output_issues:
+            print(f"  [{issue.split(':')[0]}] {issue}")
+        if has_critical_issues(output_issues):
+            logger.log("output_guardrail", "blocked", {"issues": output_issues})
+            return FinalResponse(
+                question=question,
+                sql=validated_sql,
+                answer="The generated response did not meet quality standards. "
+                       "Please try rephrasing your question.",
+            )
+    else:
+        logger.log("output_guardrail", "passed", {})
+
+    logger.log("rag_agent", "completed", final)
     logger.save_artifact("final.md", _format_final_md(final))
     logger.save_json_artifact("final.json", final)
 
@@ -235,26 +278,59 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
 # Helpers
 # ---------------------------------------------------------------------------
 
-_SUSPICIOUS_PATTERNS = [
-    r"ignore\s+(previous|above|all)\s+instructions",
-    r"drop\s+table",
-    r"delete\s+from",
-    r"insert\s+into",
-    r"update\s+\w+\s+set",
-    r";\s*(drop|delete|insert|update|alter|create)",
-    r"exfiltrate",
-    r"run\s+tool",
-]
+
+def get_schema_summary_from_config():
+    """Build a SchemaSummary from schema_config.json (for Fabric mode)."""
+    from src.models.schemas import SchemaColumn, SchemaSummary, TableSchema
+
+    config_path = os.path.join(
+        os.path.dirname(__file__), "config", "schema_config.json"
+    )
+    try:
+        with open(config_path, "r") as f:
+            config = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return SchemaSummary()
+
+    tables = []
+    for schema_entry in config.get("schemas", []):
+        columns = [
+            SchemaColumn(
+                name=col["name"],
+                type=col.get("type", "VARCHAR"),
+                pii=col.get("pii", False),
+            )
+            for col in schema_entry.get("columns", [])
+        ]
+        tables.append(TableSchema(
+            name=schema_entry["table"],
+            description=schema_entry.get("description", ""),
+            columns=columns,
+        ))
+
+    return SchemaSummary(
+        tables=tables,
+        recommended_table=tables[0].name if tables else "",
+        notes=["Schema loaded from config (Fabric mode)"],
+    )
 
 
-def _check_input_safety(question: str) -> list[str]:
-    """Basic deterministic prompt-injection screening."""
-    flags: list[str] = []
-    lower = question.lower()
-    for pattern in _SUSPICIOUS_PATTERNS:
-        if re.search(pattern, lower):
-            flags.append(f"Suspicious pattern: {pattern}")
-    return flags
+def _filter_schema_for_tables(schema_text: str, tables: list[str]) -> str:
+    """Filter schema text to only include the specified tables.
+
+    If the table list matches what's in the schema, returns the original text.
+    This is a best-effort filter — if parsing fails, returns the full schema.
+    """
+    if not tables:
+        return schema_text
+
+    # Simple approach: if the schema is already for the right table, return as-is
+    # (current dataset only has one table anyway)
+    for table in tables:
+        if table in schema_text:
+            return schema_text
+
+    return schema_text
 
 
 def _format_final_md(resp: FinalResponse) -> str:

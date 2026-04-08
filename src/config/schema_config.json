@@ -1,7 +1,11 @@
 {
+  "_meta": "Loaded at runtime; introspected types override column types when present. Edit relationships / descriptions here without code changes.",
   "schemas": [
     {
       "table": "retail_transactions_typed",
+      "description": "Retail orders and line attributes sourced from the OpenDataBay-style sample CSV.",
+      "primary_key_candidates": ["Transaction_ID"],
+      "relationships": [],
       "columns": [
         {"name": "Transaction_ID", "type": "DOUBLE", "description": "Unique transaction identifier"},
         {"name": "Customer_ID", "type": "DOUBLE", "description": "Unique customer identifier"},
@@ -35,6 +39,45 @@
         {"name": "products", "type": "VARCHAR", "description": "Product name/description"},
         {"name": "date_parsed", "type": "DATE", "description": "Parsed transaction date (alias of Date)"},
         {"name": "time_parsed", "type": "TIME", "description": "Parsed transaction time (alias of Time)"}
+      ]
+    },
+    {
+      "table": "ReplaceWithFabricTable",
+      "description": "Placeholder Fabric table — replace with real warehouse object; types come from INFORMATION_SCHEMA at runtime.",
+      "primary_key_candidates": [],
+      "relationships": [],
+      "columns": []
+    },
+    {
+      "table": "erp_order_headers",
+      "description": "Example ERP shape for a future datasource entry — no local data until ERP connector lands.",
+      "primary_key_candidates": ["order_id"],
+      "relationships": [
+        {
+          "name": "header_to_lines",
+          "to_table": "erp_order_lines",
+          "from_columns": ["order_id"],
+          "to_columns": ["order_id"],
+          "cardinality": "one_to_many"
+        }
+      ],
+      "columns": [
+        {"name": "order_id", "type": "BIGINT", "description": "Sales order identifier"},
+        {"name": "customer_ref", "type": "VARCHAR", "description": "External customer key"},
+        {"name": "order_date", "type": "DATE", "description": "Order date"}
+      ]
+    },
+    {
+      "table": "erp_order_lines",
+      "description": "Example ERP line items paired with er_order_headers.",
+      "primary_key_candidates": ["order_line_id"],
+      "relationships": [],
+      "columns": [
+        {"name": "order_line_id", "type": "BIGINT", "description": "Line key"},
+        {"name": "order_id", "type": "BIGINT", "description": "Parent order"},
+        {"name": "sku", "type": "VARCHAR", "description": "Item SKU"},
+        {"name": "quantity", "type": "DECIMAL", "description": "Ordered qty"},
+        {"name": "unit_price", "type": "DECIMAL", "description": "Unit price"}
       ]
     }
   ]

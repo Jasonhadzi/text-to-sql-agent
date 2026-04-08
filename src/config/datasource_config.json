@@ -1,18 +1,36 @@
 {
+  "default_datasource": "retail_local",
+  "_comment": "Switch default_datasource to fabric_wh when Frank provides Fabric SQL endpoint + SP secrets in env. Add ERP blocks the same way (type: fabric or odbc, tables: [...]).",
+
   "datasources": [
     {
-      "name": "retail",
+      "name": "fabric_wh",
+      "type": "fabric",
+      "description": "Microsoft Fabric Warehouse over ODBC — service principal (env: AZURE_* , FABRIC_SERVER, FABRIC_DATABASE or FABRIC_CONNECTION_STRING). Read-only enforced in connector.",
+      "sql_schema": "dbo",
+      "database": "Set FABRIC_DATABASE in environment (logical warehouse name)",
+      "tables": [
+        {
+          "name": "ReplaceWithFabricTable",
+          "description": "Placeholder — replace with real Warehouse tables when schema is available.",
+          "keywords": ["fabric", "warehouse", "placeholder"]
+        }
+      ],
+      "default_table": "ReplaceWithFabricTable"
+    },
+    {
+      "name": "retail_local",
       "type": "duckdb",
-      "description": "Retail transaction data from CSV — customer purchases, product categories, and order details",
+      "description": "Retail transaction CSV loaded into in-memory DuckDB for local / dev runs.",
       "tables": [
         {
           "name": "retail_transactions_typed",
-          "description": "Retail transactions with parsed date/time columns. Contains customer demographics, purchase amounts, product info, and order status.",
-          "keywords": ["sales", "revenue", "transactions", "purchases", "orders", "customers", "products", "categories", "brands", "payments", "shipping", "ratings", "feedback"]
+          "description": "Retail transactions with parsed date/time columns.",
+          "keywords": ["sales", "revenue", "transactions", "purchases", "orders", "customers", "products"]
         },
         {
           "name": "retail_transactions",
-          "description": "Raw retail transactions imported from CSV. Use retail_transactions_typed instead for typed date/time columns.",
+          "description": "Raw retail CSV import.",
           "keywords": ["raw", "transactions"]
         }
       ],

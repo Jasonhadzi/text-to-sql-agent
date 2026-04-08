@@ -1,14 +1,22 @@
 """Microsoft Fabric Warehouse connector — replaces DuckDB for production.
 
-Connects to Microsoft Fabric via ODBC with service principal authentication.
-Enforces read-only access at the connection level.
+Connects to Microsoft Fabric via **ODBC** (``pyodbc``) using **service principal**
+authentication. JDBC is not used in this Python stack; a JDBC client would use
+the same Azure AD app registration with the Fabric SQL endpoint and read-only
+database settings.
+
+Read-only access:
+    - ``pyodbc.connect(..., readonly=True)`` sets ODBC access mode to read-only.
+    - ``FabricConnection.execute`` only allows ``SELECT`` / ``WITH`` (CTE) text.
 
 Environment variables:
-    FABRIC_CONNECTION_STRING: Full ODBC connection string (if provided, used directly)
-    FABRIC_SERVER: Fabric SQL endpoint server
-    FABRIC_DATABASE: Fabric database/warehouse name
-    AZURE_CLIENT_ID: Service principal client ID
-    AZURE_CLIENT_SECRET: Service principal client secret
+    FABRIC_CONNECTION_STRING: Full ODBC connection string (if set, used as-is;
+        should still use SP auth and a read-only warehouse principal where possible)
+    FABRIC_SERVER: Fabric SQL endpoint hostname
+    FABRIC_DATABASE: Logical database / warehouse name
+    FABRIC_ODBC_DRIVER: Optional; defaults to ``ODBC Driver 18 for SQL Server``
+    AZURE_CLIENT_ID: Service principal (application) ID
+    AZURE_CLIENT_SECRET: Service principal secret
     AZURE_TENANT_ID: Azure AD tenant ID
 """
 
@@ -23,8 +31,28 @@ from typing import Any
 from src.models.schemas import ColumnInfo, ExecutionResult
 
 
-# Detect if Fabric is configured
-USE_FABRIC = bool(os.getenv("FABRIC_CONNECTION_STRING") or os.getenv("FABRIC_SERVER"))
+def _service_principal_env_ok() -> bool:
+    return all(
+        os.getenv(k)
+        for k in (
+            "AZURE_TENANT_ID",
+            "AZURE_CLIENT_ID",
+            "AZURE_CLIENT_SECRET",
+            "FABRIC_SERVER",
+            "FABRIC_DATABASE",
+        )
+    )
+
+
+# Fabric mode: full ODBC string, or server + database + service principal env vars
+USE_FABRIC = bool(os.getenv("FABRIC_CONNECTION_STRING")) or (
+    bool(os.getenv("FABRIC_SERVER")) and _service_principal_env_ok()
+)
+
+
+def get_sql_dialect() -> str:
+    """SQL dialect for validation/codegen (sqlglot): ``tsql`` when Fabric is active."""
+    return "tsql" if USE_FABRIC else "duckdb"
 
 
 class FabricResult:
@@ -70,9 +98,10 @@ class FabricConnection:
         client_id = os.environ["AZURE_CLIENT_ID"]
         client_secret = os.environ["AZURE_CLIENT_SECRET"]
         tenant_id = os.environ["AZURE_TENANT_ID"]
+        driver = os.getenv("FABRIC_ODBC_DRIVER", "ODBC Driver 18 for SQL Server")
 
         return (
-            f"DRIVER={{ODBC Driver 18 for SQL Server}};"
+            f"DRIVER={{{driver}}};"
             f"SERVER={server};"
             f"DATABASE={database};"
             f"UID={client_id}@{tenant_id};"
@@ -95,12 +124,16 @@ class FabricConnection:
                 )
         return self._conn
 
-    def execute(self, sql: str) -> FabricResult:
+    def execute(
+        self,
+        sql: str,
+        params: tuple | list | None = None,
+    ) -> FabricResult:
         """Execute a SQL query with read-only enforcement.
 
         Only SELECT and WITH (CTE) queries are allowed.
+        *params* are bound as ODBC parameters (for introspection metadata only).
         """
-        # Enforce read-only at the application level
         stripped = sql.strip().upper()
         if not (stripped.startswith("SELECT") or stripped.startswith("WITH")):
             raise PermissionError(
@@ -109,7 +142,10 @@ class FabricConnection:
 
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.execute(sql)
+        if params is not None:
+            cursor.execute(sql, params)
+        else:
+            cursor.execute(sql)
         return FabricResult(cursor)
 
     def close(self) -> None:

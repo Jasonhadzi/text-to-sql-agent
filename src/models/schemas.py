@@ -16,6 +16,17 @@ class SchemaColumn(BaseModel):
     name: str
     type: str
     pii: bool = False
+    description: str = ""
+
+
+class SchemaRelationship(BaseModel):
+    """Logical FK-style edge loaded from schema_config / introspection metadata."""
+
+    name: str = ""
+    to_table: str
+    from_columns: list[str] = Field(default_factory=list)
+    to_columns: list[str] = Field(default_factory=list)
+    cardinality: str = "many_to_one"
 
 
 class TableSchema(BaseModel):
@@ -23,6 +34,7 @@ class TableSchema(BaseModel):
     description: str = ""
     columns: list[SchemaColumn] = Field(default_factory=list)
     primary_key_candidates: list[str] = Field(default_factory=list)
+    relationships: list[SchemaRelationship] = Field(default_factory=list)
 
 
 class SchemaSummary(BaseModel):
@@ -53,10 +65,20 @@ class SchemaSummary(BaseModel):
         for t in self.tables:
             lines.append(f"Table: {t.name}")
             lines.append(f"  Description: {t.description}")
+            if t.relationships:
+                lines.append("  Relationships:")
+                for r in t.relationships:
+                    fc = ", ".join(r.from_columns)
+                    tc = ", ".join(r.to_columns)
+                    lines.append(
+                        f"    - → {r.to_table} ({fc}) → ({tc})"
+                        + (f" [{r.cardinality}]" if r.cardinality else "")
+                    )
             lines.append("  Columns:")
             for c in t.columns:
                 pii_tag = " [PII]" if c.pii else ""
-                lines.append(f"    - {c.name} ({c.type}){pii_tag}")
+                desc = f" — {c.description}" if c.description else ""
+                lines.append(f"    - {c.name} ({c.type}){pii_tag}{desc}")
         return "\n".join(lines)
 
 
@@ -109,7 +131,7 @@ class TechnicalSpec(BaseModel):
 
 class SQLCandidate(BaseModel):
     sql: str
-    dialect: str = "duckdb"
+    dialect: str = "duckdb"  # duckdb | tsql (Fabric / SQL Server)
     expected_columns: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 

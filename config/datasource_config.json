@@ -1,0 +1,8 @@
+{
+  "tables": [
+    {
+      "name": "retail_transactions_typed",
+      "description": "Primary retail transactions table."
+    }
+  ]
+}

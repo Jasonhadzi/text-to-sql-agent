@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +84,28 @@ class BusinessContext(BaseModel):
     grain: str = "transaction"
     pii_required: bool = False
     assumptions: list[str] = Field(default_factory=list)
+
+
+class ClarificationDecision(BaseModel):
+    is_clear: bool = True
+    route_to: str = "query_router"
+    clarifying_question: str = ""
+    ambiguity_reasons: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_decision(self) -> "ClarificationDecision":
+        if self.is_clear:
+            self.route_to = "query_router"
+            self.clarifying_question = ""
+        elif not self.clarifying_question.strip():
+            raise ValueError("clarifying_question is required when is_clear is false")
+        return self
+
+
+class QueryRoute(BaseModel):
+    relevant_tables: list[str] = Field(default_factory=list)
+    reasoning: str = ""
+    confidence: float = 0.0
 
 
 class SelectExpression(BaseModel):

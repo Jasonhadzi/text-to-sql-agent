@@ -8,6 +8,8 @@ from uuid import uuid4
 
 from agents import Runner
 
+from src.agents.clarification_agent import clarification_agent
+from src.agents.query_router_agent import query_router_agent
 from src.agents.business_context import business_context_agent
 from src.agents.technical_spec import technical_spec_agent
 from src.agents.sql_writer import sql_writer_agent
@@ -17,7 +19,9 @@ from src.agents.synthesis import synthesis_agent
 from src.models.schemas import (
     AnalysisReport,
     BusinessContext,
+    ClarificationDecision,
     FinalResponse,
+    QueryRoute,
     SQLCandidate,
     SchemaSummary,
     TechnicalSpec,
@@ -63,11 +67,52 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
         logger.log("safety", "passed", {})
 
     # ------------------------------------------------------------------
-    # Stage 1b — Business context (LLM)
+    # Stage 1a — Clarification gate (LLM)
     # ------------------------------------------------------------------
-    print("[Stage 1b] Extracting business context...")
+    print("[Stage 1a] Checking whether question is SQL-ready...")
+    clarification_input = (
+        f"## User Question\n{question}\n\n"
+        f"## Database Schema\n{schema_text}"
+    )
+    clarification_result = await Runner.run(clarification_agent, clarification_input)
+    clarification: ClarificationDecision = clarification_result.final_output
+    logger.log("clarification", "completed", clarification)
+
+    if not clarification.is_clear:
+        logger.log("clarification", "needs_user_input", {
+            "question": clarification.clarifying_question,
+            "reasons": clarification.ambiguity_reasons,
+        })
+        print(f"  Clarification required: {clarification.clarifying_question}")
+        return FinalResponse(
+            question=question,
+            answer=clarification.clarifying_question,
+        )
+
+    logger.log("clarification", "routed", {"route_to": clarification.route_to})
+
+    # ------------------------------------------------------------------
+    # Stage 1b — Query routing (LLM)
+    # ------------------------------------------------------------------
+    print("[Stage 1b] Routing question to relevant tables...")
+    route_input = (
+        f"## User Question\n{question}\n\n"
+        f"## Database Schema\n{schema_text}"
+    )
+    route_result = await Runner.run(query_router_agent, route_input)
+    route: QueryRoute = route_result.final_output
+    logger.log("query_router", "completed", route)
+    routed_tables = route.relevant_tables
+    routed_tables_text = ", ".join(routed_tables) if routed_tables else "(none selected)"
+    print(f"  Routed tables: {routed_tables_text}")
+
+    # ------------------------------------------------------------------
+    # Stage 1c — Business context (LLM)
+    # ------------------------------------------------------------------
+    print("[Stage 1c] Extracting business context...")
     biz_input = (
         f"## User Question\n{question}\n\n"
+        f"## Routed Tables\n{routed_tables_text}\n\n"
         f"## Database Schema\n{schema_text}"
     )
     biz_result = await Runner.run(business_context_agent, biz_input)
@@ -125,7 +170,7 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
             f"## Technical Specification\n{json.dumps(tech_spec.model_dump(), indent=2)}\n\n"
             f"## Proposed SQL\n```sql\n{sql_candidate.sql}\n```\n\n"
             f"## Database Schema\n{schema_text}\n\n"
-            f"## Engine Constraints\nDuckDB dialect. Only table retail_transactions_typed allowed. SELECT only."
+            f"## Engine Constraints\nDuckDB dialect. SELECT only. Prefer routed tables: {routed_tables_text}."
         )
         eval_result = await Runner.run(sql_evaluator_agent, eval_input)
         llm_eval: ValidationResult = eval_result.final_output

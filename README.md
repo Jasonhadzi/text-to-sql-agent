@@ -94,6 +94,36 @@ python -m src.app -q "Which shipping method has the highest average rating?"
 python -m src.app -q "What is the revenue split between customer segments?"
 ```
 
+## Running the Web UI
+
+The project includes a FastAPI server (`bridge_server.py`) that pairs with a React frontend for an interactive experience.
+
+### 1. Start the API server
+
+```bash
+source .venv/bin/activate
+python bridge_server.py
+```
+
+The server starts at `http://127.0.0.1:8000`. It works with or without an `OPENAI_API_KEY` — without one it returns raw data previews instead of LLM analysis.
+
+### 2. Set up the frontend
+
+In a **separate terminal**:
+
+```bash
+git clone https://github.com/rachltan/text-to-sql-agent-frontend.git
+cd text-to-sql-agent-frontend
+npm install
+npm start
+```
+
+The React dev server starts at `http://localhost:3000` and calls the backend API automatically.
+
+### 3. Verify
+
+Open `http://localhost:3000`, type a question, and confirm the answer, chart, and SQL panel all populate. Recent questions should appear in the left sidebar.
+
 ## Output
 
 Each run creates artifacts in `outputs/runs/{run_id}/`:

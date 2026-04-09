@@ -2,15 +2,41 @@
 
 from __future__ import annotations
 
+import json
+import os
+
 import duckdb
 
 from src.models.schemas import SchemaColumn, SchemaSummary, TableSchema
 
-# Columns known to contain PII in the retail dataset
-_PII_COLUMNS = {"name", "email", "phone", "address"}
+_CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "config")
 
-# Allowed tables for the SQL validator
-ALLOWED_TABLES = {"retail_transactions", "retail_transactions_typed"}
+
+def _load_pii_columns() -> set[str]:
+    """Load PII column names from config, with fallback to hardcoded defaults."""
+    try:
+        path = os.path.join(_CONFIG_DIR, "pii_config.json")
+        with open(path, "r") as f:
+            config = json.load(f)
+        return {c.lower() for c in config.get("pii_columns", [])}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"name", "email", "phone", "address"}
+
+
+def _load_allowed_tables() -> set[str]:
+    """Load allowed table names from config, with fallback to hardcoded defaults."""
+    try:
+        path = os.path.join(_CONFIG_DIR, "allowlist_config.json")
+        with open(path, "r") as f:
+            config = json.load(f)
+        return set(config.get("allowed_tables", []))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"retail_transactions", "retail_transactions_typed"}
+
+
+# Module-level variables used by sql_validate.py
+_PII_COLUMNS = _load_pii_columns()
+ALLOWED_TABLES = _load_allowed_tables()
 
 
 def load_csv_to_duckdb(csv_path: str) -> duckdb.DuckDBPyConnection:
@@ -81,3 +107,13 @@ def get_schema_summary(conn: duckdb.DuckDBPyConnection) -> SchemaSummary:
         recommended_table="retail_transactions_typed",
         notes=[f"Total rows: {row_count}"],
     )
+
+
+def load_datasource_config() -> dict:
+    """Load the datasource configuration for the query router."""
+    try:
+        path = os.path.join(_CONFIG_DIR, "datasource_config.json")
+        with open(path, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"datasources": []}

@@ -9,6 +9,8 @@ dependencies = [
     "sqlglot",
     "pydantic>=2.0",
     "python-dotenv",
+    "fastapi",
+    "uvicorn[standard]",
 ]
 
 [project.optional-dependencies]

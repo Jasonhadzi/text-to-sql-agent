@@ -29,6 +29,7 @@ from src.models.schemas import (
     ClarificationResult,
     FinalResponse,
     RoutingResult,
+    SchemaSummary,
     SQLCandidate,
 )
 from src.tools.redact import redact_preview
@@ -43,6 +44,56 @@ from src.tools.sql_execute import execute_sql
 from src.tools.sql_validate import inject_limit, validate_sql
 
 MAX_SQL_ATTEMPTS = 3
+
+
+def _warn_datasource_env_mismatch(datasource_config: dict, use_fabric: bool) -> None:
+    """Log when ``default_datasource`` in JSON disagrees with actual backend (USE_FABRIC)."""
+    name = datasource_config.get("default_datasource")
+    if not name:
+        return
+    by_name = {d.get("name"): d for d in datasource_config.get("datasources", []) if d.get("name")}
+    target = by_name.get(name)
+    if not target:
+        return
+    dtype = str(target.get("type", "")).lower()
+    if use_fabric and dtype in ("duckdb", "csv", "local"):
+        print(
+            f"  [WARN] Fabric env is active (USE_FABRIC) but default_datasource "
+            f"'{name}' is a local type ({dtype}). Pipeline uses the warehouse; "
+            f"set default_datasource to your Fabric entry in datasource_config.json "
+            f"to avoid confusion."
+        )
+    if not use_fabric and dtype == "fabric":
+        print(
+            f"  [WARN] Fabric env is not set (DuckDB/CSV path) but default_datasource "
+            f"'{name}' is fabric. Set FABRIC_* / AZURE_* (or FABRIC_CONNECTION_STRING) "
+            f"to use the live warehouse."
+        )
+
+
+def _citation_tables_for_api(
+    schema: SchemaSummary, routing: RoutingResult | None
+) -> list[str]:
+    known = {t.name for t in schema.tables}
+    if routing and routing.relevant_tables:
+        picked = [t for t in routing.relevant_tables if t in known]
+        if picked:
+            return picked
+    if schema.recommended_table and schema.recommended_table in known:
+        return [schema.recommended_table]
+    if schema.tables:
+        return [schema.tables[0].name]
+    return []
+
+
+def _attach_backend_meta(
+    resp: FinalResponse,
+    schema: SchemaSummary,
+    routing: RoutingResult | None,
+    use_fabric: bool,
+) -> None:
+    resp.data_backend = "fabric" if use_fabric else "duckdb"
+    resp.citation_tables = _citation_tables_for_api(schema, routing)
 
 
 async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
@@ -63,15 +114,16 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
     # ------------------------------------------------------------------
     print("[Stage 0] Loading data and introspecting schema...")
     dialect = get_sql_dialect()
+    datasource_config = load_datasource_config()
+    _warn_datasource_env_mismatch(datasource_config, USE_FABRIC)
+
     if USE_FABRIC:
         print("  [INFO] Using Microsoft Fabric Warehouse (ODBC, service principal, read-only)")
         conn = get_fabric_connection()
-        datasource_config = load_datasource_config()
         schema = build_fabric_schema_summary(conn, datasource_config)
     else:
         conn = load_csv_to_duckdb(csv_path)
         schema = get_schema_summary(conn)
-        datasource_config = load_datasource_config()
 
     logger.save_json_artifact("schema.json", schema)
     logger.log("schema", "introspected", {"tables": len(schema.tables), "notes": schema.notes})
@@ -87,11 +139,13 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
         if is_hard_block(safety_issues):
             logger.log("safety", "hard_blocked", {"issues": safety_issues})
             print(f"  [BLOCKED] Hard block triggered: {safety_issues}")
-            return FinalResponse(
+            fr = FinalResponse(
                 question=question,
                 answer="Your question was blocked by our safety system. "
                        "Please rephrase without instructions or commands.",
             )
+            _attach_backend_meta(fr, schema, None, USE_FABRIC)
+            return fr
         print(f"  [WARN] Safety flags (soft): {safety_issues}")
     else:
         logger.log("safety", "passed", {})
@@ -115,11 +169,13 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
             "clarifying_question": clar.clarifying_question
         })
         print(f"  [CLARIFY] {clar.clarifying_question}")
-        return FinalResponse(
+        fr = FinalResponse(
             question=question,
             needs_clarification=True,
             answer=clar.clarifying_question,
         )
+        _attach_backend_meta(fr, schema, None, USE_FABRIC)
+        return fr
     print(f"  Question is clear (confidence: {clar.confidence:.2f})")
 
     # ------------------------------------------------------------------
@@ -194,11 +250,13 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
     if validated_sql is None:
         logger.log("pipeline", "failed", {"reason": "SQL validation failed after max attempts"})
         print("[FAILED] Could not produce a valid SQL query.")
-        return FinalResponse(
+        fr = FinalResponse(
             question=question,
             answer="I was unable to generate a valid SQL query for your question after multiple attempts. "
                    "Please try rephrasing your question.",
         )
+        _attach_backend_meta(fr, schema, routing, USE_FABRIC)
+        return fr
 
     # ------------------------------------------------------------------
     # Stage 6 — Execute SQL (Fabric Warehouse or DuckDB)
@@ -212,11 +270,13 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
     except Exception as exc:
         logger.log("execution", "error", {"error": str(exc)})
         print(f"  [ERROR] Execution failed: {exc}")
-        return FinalResponse(
+        fr = FinalResponse(
             question=question,
             sql=validated_sql,
             answer=f"The SQL query was valid but execution failed: {exc}",
         )
+        _attach_backend_meta(fr, schema, routing, USE_FABRIC)
+        return fr
 
     logger.log("execution", "completed", {
         "row_count": exec_result.row_count,
@@ -241,6 +301,10 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
     rag_result = await Runner.run(rag_agent, rag_input, run_config=run_config)
     final: FinalResponse = rag_result.final_output
 
+    # Deterministic SQL + API metadata (DuckDB / Fabric parity)
+    final.sql = validated_sql
+    _attach_backend_meta(final, schema, routing, USE_FABRIC)
+
     # Attach structured data from execution so the API can surface
     # grounded tables/charts to the frontend.
     final.preview_rows = preview_rows
@@ -262,12 +326,14 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
             print(f"  [{issue.split(':')[0]}] {issue}")
         if has_critical_issues(output_issues):
             logger.log("output_guardrail", "blocked", {"issues": output_issues})
-            return FinalResponse(
+            fr = FinalResponse(
                 question=question,
                 sql=validated_sql,
                 answer="The generated response did not meet quality standards. "
                        "Please try rephrasing your question.",
             )
+            _attach_backend_meta(fr, schema, routing, USE_FABRIC)
+            return fr
     else:
         logger.log("output_guardrail", "passed", {})
 
@@ -291,7 +357,9 @@ def _schema_prompt_preamble(dialect: str) -> str:
             "## SQL dialect\n"
             "Target warehouse: **Microsoft Fabric / T-SQL**. Emit dialect-compatible SQL only: "
             "use `TOP (n)` or `OFFSET ... ROWS FETCH NEXT n ROWS ONLY` instead of `LIMIT`. "
-            "Use unqualified table names exactly as listed in the schema (or `[schema].[table]` if shown).\n\n"
+            "Use unqualified table names exactly as listed in the schema (or `[schema].[table]` if shown).\n"
+            "Date filters: if `Date` is a string column, use `TRY_CONVERT(date, Date)` or "
+            "`CAST(Date AS date)` — do **not** assume `date_parsed` / `time_parsed` exist on Fabric.\n\n"
         )
     return (
         "## SQL dialect\n"

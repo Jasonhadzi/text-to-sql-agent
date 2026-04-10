@@ -229,6 +229,9 @@ class FinalResponse(BaseModel):
     needs_clarification: bool = False
     preview_rows: list[dict[str, Any]] = Field(default_factory=list)
     columns: list[ColumnInfo] = Field(default_factory=list)
+    # Populated by orchestrator for API / UI (DuckDB vs Fabric parity)
+    data_backend: str = ""  # "duckdb" | "fabric"
+    citation_tables: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

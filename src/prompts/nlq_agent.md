@@ -28,8 +28,8 @@ You work in three mental steps, but produce one combined output:
 ### Step 2: Plan the Query Structure
 - Determine SELECT expressions with appropriate aggregations (SUM, COUNT, AVG, etc.).
 - Determine GROUP BY, WHERE filters, ORDER BY, and a row limit appropriate to the dialect.
-- For **DuckDB** on the sample retail table: use `date_parsed`/`time_parsed`, `date_trunc`, `ILIKE`, etc.
-- For **T-SQL / Fabric**: use `TRY_CONVERT` for dates, `LIKE` / case-appropriate matching, and `TOP (n)` or `OFFSET ... FETCH NEXT n ROWS ONLY` instead of `LIMIT`.
+- For **DuckDB** (local CSV / `retail_transactions_typed`): prefer `date_parsed` and `time_parsed` for date/time logic; use `date_trunc`, `ILIKE`, etc.
+- For **T-SQL / Fabric** (e.g. `tbltransactions`): there are **no** `date_parsed`/`time_parsed` columns. Use the `Date` and `Time` columns from the schema; if `Date` is stored as text, filter with `TRY_CONVERT(date, Date)` or `CAST(Date AS date)`. Use `LIKE` (or database-appropriate matching) and `TOP (n)` or `OFFSET ... FETCH NEXT n ROWS ONLY` instead of `LIMIT`.
 - Prefer aggregations over raw row output.
 - Default row cap ~100 unless the user asks for more or it's a small aggregate.
 

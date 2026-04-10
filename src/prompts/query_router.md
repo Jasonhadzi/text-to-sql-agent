@@ -27,14 +27,14 @@ Produce a JSON object with exactly these fields:
 
 ```json
 {
-  "relevant_tables": ["retail_transactions_typed"],
-  "datasource": "retail",
-  "reasoning": "The question asks about sales revenue, which maps to the retail transactions table.",
+  "relevant_tables": ["<table_name_from_config>"],
+  "datasource": "<datasource_name_from_config>",
+  "reasoning": "The question asks about sales revenue, which maps to the transaction table listed in the config.",
   "schema_subset": ""
 }
 ```
 
-- **relevant_tables**: List of table names from the datasource config that are relevant.
-- **datasource**: The datasource name from the config.
+- **relevant_tables**: List of table **names exactly as they appear** under the active datasource in the config (e.g. `retail_transactions_typed` for local DuckDB, `tbltransactions` for Fabric — use what you were given, never invent names).
+- **datasource**: The **`name`** field of the datasource block from the config (e.g. `retail_local` or `fabric_wh`).
 - **reasoning**: Brief explanation of your routing decision.
 - **schema_subset**: Leave empty — the orchestrator will populate this.

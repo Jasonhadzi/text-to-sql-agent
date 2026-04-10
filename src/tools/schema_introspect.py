@@ -1,4 +1,8 @@
-"""Schema loading: DuckDB from CSV, or dynamic introspection from Fabric / SQL endpoints.
+"""Schema loading: DuckDB from CSV (local dev), or dynamic introspection from Fabric.
+
+Fabric mode queries ``INFORMATION_SCHEMA.COLUMNS`` / ``TABLES`` for the configured
+``sql_schema`` — any tables/columns the warehouse exposes there are supported; the
+logical database name (e.g. OpenDataBay) is only a label in ``datasource_config.json``.
 
 Runtime metadata is merged with ``schema_config.json`` (column descriptions, PII,
 relationships). Allowed tables for validation come from ``datasource_config.json``

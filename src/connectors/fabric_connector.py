@@ -1,7 +1,11 @@
 """Microsoft Fabric Warehouse connector — replaces DuckDB for production.
 
-Connects to Microsoft Fabric via **ODBC** (``pyodbc``) using **service principal**
-authentication.  Two auth strategies are tried in order:
+This runtime uses **ODBC only** (``pyodbc``). **JDBC is not used** here; a JVM
+service would use JDBC separately. Warehouse access is **Azure AD service
+principal** (client id + secret + tenant), either via ``FABRIC_CONNECTION_STRING``
+or ``FABRIC_SERVER`` / ``FABRIC_DATABASE`` plus ``AZURE_*`` env vars.
+
+Two auth strategies are tried in order:
 
 1. **MSAL token-based auth** — acquires an Azure AD access token via
    ``msal.ConfidentialClientApplication`` and passes it as a pre-auth
@@ -11,10 +15,16 @@ authentication.  Two auth strategies are tried in order:
    ``msal`` is not installed.
 
 Read-only access:
-    - ``FabricConnection.execute`` only allows ``SELECT`` / ``WITH`` (CTE) text.
+    - **Connection string**: ``ApplicationIntent=ReadOnly`` is appended when
+      missing (ODBC read intent for SQL Server–compatible endpoints).
+    - **API**: ``FabricConnection.execute`` only allows ``SELECT`` / ``WITH`` (CTE).
+
+Credentials (e.g. from Frank) belong in environment or a secret store — never
+committed to the repo.
 
 Environment variables:
-    FABRIC_CONNECTION_STRING: Full ODBC connection string (if set, used as-is)
+    FABRIC_CONNECTION_STRING: Full ODBC connection string (Azure AD / SP auth;
+        read intent applied if not already present)
     FABRIC_SERVER: Fabric SQL endpoint hostname
     FABRIC_DATABASE: Logical database / warehouse name
     FABRIC_ODBC_DRIVER: Optional; defaults to ``ODBC Driver 18 for SQL Server``
@@ -33,6 +43,16 @@ import time
 from typing import Any
 
 from src.models.schemas import ColumnInfo, ExecutionResult
+
+
+def _odbc_connection_string_with_read_intent(conn_str: str) -> str:
+    """Ensure ``ApplicationIntent=ReadOnly`` for ODBC (connection-level read intent)."""
+    s = conn_str.strip()
+    if re.search(r"\bApplicationIntent\s*=", s, re.IGNORECASE):
+        return s
+    if s.endswith(";"):
+        return s + "ApplicationIntent=ReadOnly;"
+    return s + ";ApplicationIntent=ReadOnly;"
 
 
 def _service_principal_env_ok() -> bool:
@@ -148,7 +168,7 @@ class FabricConnection:
         omitted (used when passing a pre-auth token via attrs_before).
         """
         if conn_str := os.getenv("FABRIC_CONNECTION_STRING"):
-            return conn_str
+            return _odbc_connection_string_with_read_intent(conn_str)
 
         server = os.environ["FABRIC_SERVER"]
         database = os.environ["FABRIC_DATABASE"]
@@ -160,6 +180,7 @@ class FabricConnection:
             f"DATABASE={database};"
             f"Encrypt=yes;"
             f"TrustServerCertificate=no;"
+            f"ApplicationIntent=ReadOnly;"
         )
 
         if include_auth:
@@ -198,7 +219,8 @@ class FabricConnection:
         # --- Strategy 1: explicit connection string -------------------------
         if self._explicit_conn_string:
             try:
-                self._conn = pyodbc.connect(self._explicit_conn_string)
+                conn_ready = _odbc_connection_string_with_read_intent(self._explicit_conn_string)
+                self._conn = pyodbc.connect(conn_ready)
                 print("  [INFO] Connected to Fabric using explicit connection string")
                 return self._conn
             except pyodbc.Error as exc:

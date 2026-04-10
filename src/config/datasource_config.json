@@ -1,6 +1,6 @@
 {
-  "default_datasource": "retail_local",
-  "_comment": "Switch default_datasource to fabric_wh when Frank provides Fabric SQL endpoint + SP secrets in env. Add ERP blocks the same way (type: fabric or odbc, tables: [...]).",
+  "default_datasource": "fabric_wh",
+  "_comment": "Set default_datasource to fabric_wh for Fabric mode or retail_local for DuckDB mode. When using Fabric, tables are auto-discovered from INFORMATION_SCHEMA if only placeholders are listed.",
 
   "datasources": [
     {
@@ -8,15 +8,15 @@
       "type": "fabric",
       "description": "Microsoft Fabric Warehouse over ODBC — service principal (env: AZURE_* , FABRIC_SERVER, FABRIC_DATABASE or FABRIC_CONNECTION_STRING). Read-only enforced in connector.",
       "sql_schema": "dbo",
-      "database": "Set FABRIC_DATABASE in environment (logical warehouse name)",
+      "database": "OpenDataBay",
       "tables": [
         {
-          "name": "ReplaceWithFabricTable",
-          "description": "Placeholder — replace with real Warehouse tables when schema is available.",
-          "keywords": ["fabric", "warehouse", "placeholder"]
+          "name": "tbltransactions",
+          "description": "Retail-style transaction fact table in Fabric (replaces DuckDB retail_transactions_typed for USE_FABRIC runs).",
+          "keywords": ["sales", "revenue", "transactions", "purchases", "orders", "customers", "products", "fabric"]
         }
       ],
-      "default_table": "ReplaceWithFabricTable"
+      "default_table": "tbltransactions"
     },
     {
       "name": "retail_local",

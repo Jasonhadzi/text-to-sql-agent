@@ -1,17 +1,20 @@
 """Microsoft Fabric Warehouse connector — replaces DuckDB for production.
 
 Connects to Microsoft Fabric via **ODBC** (``pyodbc``) using **service principal**
-authentication. JDBC is not used in this Python stack; a JDBC client would use
-the same Azure AD app registration with the Fabric SQL endpoint and read-only
-database settings.
+authentication.  Two auth strategies are tried in order:
+
+1. **MSAL token-based auth** — acquires an Azure AD access token via
+   ``msal.ConfidentialClientApplication`` and passes it as a pre-auth
+   attribute (``SQL_COPT_SS_ACCESS_TOKEN``).  This is more reliable across
+   Fabric SKUs than the ODBC driver's built-in SP flow.
+2. **ODBC built-in** ``ActiveDirectoryServicePrincipal`` — fallback if
+   ``msal`` is not installed.
 
 Read-only access:
-    - ``pyodbc.connect(..., readonly=True)`` sets ODBC access mode to read-only.
     - ``FabricConnection.execute`` only allows ``SELECT`` / ``WITH`` (CTE) text.
 
 Environment variables:
-    FABRIC_CONNECTION_STRING: Full ODBC connection string (if set, used as-is;
-        should still use SP auth and a read-only warehouse principal where possible)
+    FABRIC_CONNECTION_STRING: Full ODBC connection string (if set, used as-is)
     FABRIC_SERVER: Fabric SQL endpoint hostname
     FABRIC_DATABASE: Logical database / warehouse name
     FABRIC_ODBC_DRIVER: Optional; defaults to ``ODBC Driver 18 for SQL Server``
@@ -25,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import struct
 import time
 from typing import Any
 
@@ -53,6 +57,55 @@ USE_FABRIC = bool(os.getenv("FABRIC_CONNECTION_STRING")) or (
 def get_sql_dialect() -> str:
     """SQL dialect for validation/codegen (sqlglot): ``tsql`` when Fabric is active."""
     return "tsql" if USE_FABRIC else "duckdb"
+
+
+# ---- MSAL token acquisition ------------------------------------------------
+
+_SQL_COPT_SS_ACCESS_TOKEN = 1256
+_FABRIC_SQL_SCOPE = "https://database.windows.net/.default"
+
+
+def _acquire_token_msal() -> str | None:
+    """Acquire an Azure AD access token for the SQL endpoint via MSAL.
+
+    Returns the raw JWT string, or *None* if msal is not installed or
+    token acquisition fails.
+    """
+    try:
+        import msal  # noqa: F811
+    except ImportError:
+        return None
+
+    tenant_id = os.environ.get("AZURE_TENANT_ID", "")
+    client_id = os.environ.get("AZURE_CLIENT_ID", "")
+    client_secret = os.environ.get("AZURE_CLIENT_SECRET", "")
+    if not (tenant_id and client_id and client_secret):
+        return None
+
+    authority = f"https://login.microsoftonline.com/{tenant_id}"
+    app = msal.ConfidentialClientApplication(
+        client_id,
+        authority=authority,
+        client_credential=client_secret,
+    )
+    result = app.acquire_token_for_client(scopes=[_FABRIC_SQL_SCOPE])
+    if "access_token" in result:
+        return result["access_token"]
+
+    print(
+        f"  [WARN] MSAL token error: {result.get('error')}: "
+        f"{result.get('error_description', '')[:200]}"
+    )
+    return None
+
+
+def _token_to_odbc_struct(token: str) -> bytes:
+    """Encode a JWT into the binary struct expected by SQL_COPT_SS_ACCESS_TOKEN."""
+    token_bytes = token.encode("utf-16-le")
+    return struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
+
+
+# ---- FabricResult / FabricConnection ---------------------------------------
 
 
 class FabricResult:
@@ -84,45 +137,114 @@ class FabricConnection:
         connection_string:
             ODBC connection string. If None, built from environment variables.
         """
-        self._conn_string = connection_string or self._build_connection_string()
+        self._explicit_conn_string = connection_string
         self._conn: Any = None
 
     @staticmethod
-    def _build_connection_string() -> str:
-        """Build ODBC connection string from environment variables."""
+    def _build_connection_string(*, include_auth: bool = True) -> str:
+        """Build ODBC connection string from environment variables.
+
+        When *include_auth* is False the UID/PWD/Authentication keys are
+        omitted (used when passing a pre-auth token via attrs_before).
+        """
         if conn_str := os.getenv("FABRIC_CONNECTION_STRING"):
             return conn_str
 
         server = os.environ["FABRIC_SERVER"]
         database = os.environ["FABRIC_DATABASE"]
-        client_id = os.environ["AZURE_CLIENT_ID"]
-        client_secret = os.environ["AZURE_CLIENT_SECRET"]
-        tenant_id = os.environ["AZURE_TENANT_ID"]
         driver = os.getenv("FABRIC_ODBC_DRIVER", "ODBC Driver 18 for SQL Server")
 
-        return (
+        base = (
             f"DRIVER={{{driver}}};"
             f"SERVER={server};"
             f"DATABASE={database};"
-            f"UID={client_id}@{tenant_id};"
-            f"PWD={client_secret};"
-            f"Authentication=ActiveDirectoryServicePrincipal;"
             f"Encrypt=yes;"
             f"TrustServerCertificate=no;"
         )
 
+        if include_auth:
+            client_id = os.environ["AZURE_CLIENT_ID"]
+            client_secret = os.environ["AZURE_CLIENT_SECRET"]
+            tenant_id = os.environ["AZURE_TENANT_ID"]
+            base += (
+                f"UID={client_id}@{tenant_id};"
+                f"PWD={client_secret};"
+                f"Authentication=ActiveDirectoryServicePrincipal;"
+            )
+
+        return base
+
     def _get_connection(self) -> Any:
-        """Lazily establish the pyodbc connection."""
-        if self._conn is None:
+        """Lazily establish the pyodbc connection.
+
+        Strategy order:
+        1. If an explicit connection string was provided, use it directly.
+        2. Try MSAL token-based auth (most reliable for Fabric).
+        3. Fall back to ODBC driver's built-in ActiveDirectoryServicePrincipal.
+        """
+        if self._conn is not None:
+            return self._conn
+
+        try:
+            import pyodbc
+        except ImportError:
+            raise RuntimeError(
+                "pyodbc is required for Fabric connections. "
+                "Install with: pip install pyodbc"
+            )
+
+        last_error: Exception | None = None
+
+        # --- Strategy 1: explicit connection string -------------------------
+        if self._explicit_conn_string:
             try:
-                import pyodbc
-                self._conn = pyodbc.connect(self._conn_string, readonly=True)
-            except ImportError:
-                raise RuntimeError(
-                    "pyodbc is required for Fabric connections. "
-                    "Install with: pip install pyodbc"
+                self._conn = pyodbc.connect(self._explicit_conn_string)
+                print("  [INFO] Connected to Fabric using explicit connection string")
+                return self._conn
+            except pyodbc.Error as exc:
+                last_error = exc
+                print(f"  [WARN] Explicit connection string failed: {exc}")
+
+        # --- Strategy 2: MSAL token-based auth ------------------------------
+        token = _acquire_token_msal()
+        if token:
+            try:
+                conn_str = self._build_connection_string(include_auth=False)
+                token_struct = _token_to_odbc_struct(token)
+                self._conn = pyodbc.connect(
+                    conn_str,
+                    attrs_before={_SQL_COPT_SS_ACCESS_TOKEN: token_struct},
                 )
-        return self._conn
+                print("  [INFO] Connected to Fabric using MSAL token auth")
+                return self._conn
+            except pyodbc.Error as exc:
+                last_error = exc
+                print(f"  [WARN] MSAL token connection failed: {exc}")
+
+        # --- Strategy 3: ODBC built-in SP auth ------------------------------
+        try:
+            conn_str = self._build_connection_string(include_auth=True)
+            self._conn = pyodbc.connect(conn_str)
+            print("  [INFO] Connected to Fabric using ODBC SP auth")
+            return self._conn
+        except pyodbc.Error as exc:
+            last_error = exc
+            print(f"  [WARN] ODBC SP auth connection failed: {exc}")
+
+        # --- All strategies failed ------------------------------------------
+        raise RuntimeError(
+            f"Could not connect to Microsoft Fabric Warehouse.\n"
+            f"Last error: {last_error}\n\n"
+            f"Troubleshooting checklist:\n"
+            f"  1. Verify the service principal ({os.getenv('AZURE_CLIENT_ID')}) "
+            f"has been granted access to the Fabric workspace.\n"
+            f"  2. Ensure 'Service principals can use Fabric APIs' is enabled "
+            f"in the Fabric Admin Portal.\n"
+            f"  3. The service principal must be added to the workspace with "
+            f"at least Viewer/Contributor role.\n"
+            f"  4. Check that FABRIC_SERVER and FABRIC_DATABASE are correct.\n"
+            f"  5. Verify the client secret has not expired."
+        )
 
     def execute(
         self,

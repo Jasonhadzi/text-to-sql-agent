@@ -301,10 +301,64 @@ def schema_summary_from_config_only(schema_cfg: dict) -> SchemaSummary:
     )
 
 
+def _discover_tables_from_fabric(conn: Any, sql_schema: str) -> list[dict]:
+    """Auto-discover all tables/views in the given schema from INFORMATION_SCHEMA.
+
+    Returns a list of dicts like ``[{"name": "MyTable", "description": "BASE TABLE"}, ...]``.
+    """
+    discovery_sql = """
+        SELECT TABLE_NAME, TABLE_TYPE
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = ?
+        ORDER BY TABLE_NAME
+    """
+    result = conn.execute(discovery_sql, params=[sql_schema])
+    rows = result.fetchall()
+    return [
+        {"name": str(row[0]), "description": f"Fabric {str(row[1]).lower()}"}
+        for row in rows
+    ]
+
+
+def _is_placeholder_table_list(table_metas: list[dict]) -> bool:
+    """Detect if the configured table list only contains placeholders."""
+    if not table_metas:
+        return True
+    placeholder_names = {"replacewithfabrictable", "placeholder", ""}
+    return all(
+        str(tm.get("name", "")).lower().strip() in placeholder_names
+        for tm in table_metas
+    )
+
+
 def introspect_fabric_schema(conn: Any, datasource_entry: dict) -> SchemaSummary:
-    """Query INFORMATION_SCHEMA for each table listed under the Fabric datasource."""
+    """Query INFORMATION_SCHEMA for each table listed under the Fabric datasource.
+
+    If only placeholder tables are configured, auto-discovers all tables in the
+    schema from ``INFORMATION_SCHEMA.TABLES`` first.
+    """
     sql_schema = str(datasource_entry.get("sql_schema") or datasource_entry.get("schema") or "dbo")
     table_metas = datasource_entry.get("tables") or []
+
+    # Auto-discover tables if the config only has placeholders
+    if _is_placeholder_table_list(table_metas):
+        print(f"  [INFO] Auto-discovering tables in schema [{sql_schema}]...")
+        try:
+            discovered = _discover_tables_from_fabric(conn, sql_schema)
+            if discovered:
+                print(f"  [INFO] Discovered {len(discovered)} tables: "
+                      f"{[t['name'] for t in discovered]}")
+                table_metas = discovered
+            else:
+                return SchemaSummary(
+                    notes=[f"No tables found in schema [{sql_schema}]. "
+                           f"Check the sql_schema setting in datasource_config.json."],
+                )
+        except Exception as exc:
+            return SchemaSummary(
+                notes=[f"Table discovery failed for schema [{sql_schema}]: {exc}"],
+            )
+
     if not table_metas:
         return SchemaSummary(notes=["No tables configured for Fabric datasource"])
 
@@ -361,7 +415,7 @@ def introspect_fabric_schema(conn: Any, datasource_entry: dict) -> SchemaSummary
     return SchemaSummary(
         tables=tables,
         recommended_table="",
-        notes=notes or ["Fabric schema introspection complete"],
+        notes=notes or [f"Fabric schema introspection complete ({len(tables)} tables)"],
     )
 
 
@@ -384,6 +438,7 @@ def build_fabric_schema_summary(conn: Any, datasource_config: dict) -> SchemaSum
         ds.get("default_table") or (summary.tables[0].name if summary.tables else "")
     )
 
+    # If introspection returned placeholder results, try table names from config
     fabric_tables = {str(t["name"]) for t in ds.get("tables", []) if t.get("name")}
     if not summary.tables and fabric_tables and schema_cfg.get("schemas"):
         filtered = schema_summary_from_config_filtered(

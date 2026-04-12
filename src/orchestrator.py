@@ -96,12 +96,17 @@ def _attach_backend_meta(
     resp.citation_tables = _citation_tables_for_api(schema, routing)
 
 
-async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
+async def run_pipeline(
+    question: str,
+    csv_path: str,
+    conversation_history: list | None = None,
+) -> FinalResponse:
     """Execute the full text-to-SQL agent pipeline and return a ``FinalResponse``."""
 
     run_id = uuid4().hex[:12]
     logger = RunLogger(run_id)
     logger.log("setup", "run_started", {"question": question, "csv_path": csv_path})
+    history_text = _format_conversation_history(conversation_history)
     print(f"\n[run_id={run_id}] Starting pipeline...")
 
     # Get Azure run config (None if not configured — uses default OpenAI)
@@ -155,6 +160,7 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
     # ------------------------------------------------------------------
     print("[Stage 2] Clarification Agent checking question clarity...")
     clarification_input = (
+        f"{history_text}"
         f"## User Question\n{question}\n\n"
         f"## Database Schema\n{schema_text}"
     )
@@ -208,6 +214,7 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
         print(f"[Stage 4] NLQ Agent generating SQL (attempt {attempt + 1}/{MAX_SQL_ATTEMPTS})...")
 
         nlq_input = (
+            f"{history_text}"
             f"## User Question\n{question}\n\n"
             f"## Database Schema\n{filtered_schema_text}"
         )
@@ -292,6 +299,7 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
     # ------------------------------------------------------------------
     print("[Stage 7] RAG Agent generating answer...")
     rag_input = (
+        f"{history_text}"
         f"## User Question\n{question}\n\n"
         f"## SQL Query\n```sql\n{validated_sql}\n```\n\n"
         f"## Execution Summary\n{exec_result.row_count} rows returned in {exec_result.execution_ms}ms\n\n"
@@ -349,6 +357,27 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _format_conversation_history(conversation_history: list | None) -> str:
+    """Format recent conversation turns into a prompt section."""
+    if not conversation_history:
+        return ""
+    lines = ["## Conversation History (most recent exchanges)\n"]
+    for i, turn in enumerate(conversation_history, 1):
+        lines.append(f"### Exchange {i}")
+        lines.append(f"User: {turn.question}")
+        lines.append(f"Answer: {turn.answer}")
+        if turn.sql:
+            lines.append(f"SQL used: {turn.sql}")
+        lines.append("")
+    lines.append(
+        "Use this conversation history to resolve references like "
+        '"what about...", "for that category", "the same but...", etc. '
+        "If the current question refers to entities or metrics from prior exchanges, "
+        "incorporate that context.\n\n"
+    )
+    return "\n".join(lines)
 
 
 def _schema_prompt_preamble(dialect: str) -> str:

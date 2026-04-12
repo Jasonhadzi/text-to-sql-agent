@@ -32,9 +32,16 @@ app.add_middleware(
 )
 
 
+class ConversationTurn(BaseModel):
+    question: str
+    answer: str
+    sql: str = ""
+
+
 class QueryRequest(BaseModel):
     query: str
     source: str | None = None
+    conversation_history: list[ConversationTurn] = []
 
 
 def _resolve_csv_path(source: str | None) -> str:
@@ -139,7 +146,9 @@ async def handle_query(request: QueryRequest):
         }
 
     # Delegate to the existing multi‑agent text‑to‑SQL pipeline.
-    final: FinalResponse = await run_pipeline(request.query, csv_path)
+    final: FinalResponse = await run_pipeline(
+        request.query, csv_path, conversation_history=request.conversation_history
+    )
 
     # Persist this exchange for history
     save_chat(final.question, final.answer, final.sql or "")

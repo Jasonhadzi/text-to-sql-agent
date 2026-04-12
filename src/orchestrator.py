@@ -25,6 +25,7 @@ from src.connectors.fabric_connector import (
 )
 from src.guardrails.input_guardrail import check_input_safety, is_hard_block
 from src.guardrails.output_guardrail import check_output_safety, has_critical_issues
+from src.guardrails.sql_guardrail import check_sql
 from src.models.schemas import (
     ClarificationResult,
     FinalResponse,
@@ -229,8 +230,19 @@ async def run_pipeline(
         logger.log("nlq_agent", f"attempt_{attempt}", sql_candidate)
         print(f"  SQL: {sql_candidate.sql[:120]}...")
 
-        # ---- Stage 5: SQL Guardrail — deterministic validation (hard gate) ----
-        print(f"[Stage 5] SQL Guardrail validating (attempt {attempt + 1})...")
+        # ---- Stage 5a: SQL Guardrail — regex/allowlist check ----
+        print(f"[Stage 5a] SQL Guardrail allowlist check (attempt {attempt + 1})...")
+        datasource_name = routing.datasource if routing else "default"
+        sql_guard = check_sql(sql_candidate.sql, datasource=datasource_name)
+        logger.log("sql_guardrail_check", f"attempt_{attempt}", sql_guard)
+
+        if not sql_guard["allowed"]:
+            errors_feedback = f"- {sql_guard['reason']}"
+            print(f"  [BLOCKED] {sql_guard['reason']}")
+            continue
+
+        # ---- Stage 5b: SQL Guardrail — AST validation (hard gate) ----
+        print(f"[Stage 5b] SQL AST validation (attempt {attempt + 1})...")
         det_val = validate_sql(
             sql_candidate.sql,
             schema,

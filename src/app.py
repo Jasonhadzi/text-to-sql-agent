@@ -1,18 +1,27 @@
-"""CLI entry point for the text-to-SQL agent pipeline."""
+"""CLI entry point for the text-to-SQL agent pipeline.
+
+IMPORTANT: load_dotenv() is called at module level (before any src.* imports)
+so that environment variables are available when agent modules are imported
+and call get_model_name() during Agent() construction.
+"""
 
 from __future__ import annotations
+
+# ── Load .env FIRST — before any src.* imports that call get_model_name() ──
+from dotenv import load_dotenv
+load_dotenv()
+# ───────────────────────────────────────────────────────────────────────────
 
 import argparse
 import asyncio
 import os
 import sys
 
-from dotenv import load_dotenv
+from src.connectors.azure_openai_connector import setup_foundry_tracing
+setup_foundry_tracing()
 
 
 def main() -> None:
-    load_dotenv()
-
     parser = argparse.ArgumentParser(
         description="Ask a natural language question about your retail data.",
     )
@@ -28,15 +37,20 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Validate API key (after argparse so --help still works)
-    if not os.environ.get("OPENAI_API_KEY"):
-        print("ERROR: OPENAI_API_KEY not set. Create a .env file or export it.")
+    # Validate that at least one LLM backend is configured.
+    has_foundry = bool(os.environ.get("AZURE_AI_INFERENCE_ENDPOINT"))
+    has_azure   = bool(os.environ.get("AZURE_OPENAI_ENDPOINT"))
+    has_openai  = bool(os.environ.get("OPENAI_API_KEY"))
+    if not (has_foundry or has_azure or has_openai):
+        print("ERROR: No LLM backend configured. Set one of:")
+        print("  AZURE_AI_INFERENCE_ENDPOINT  (Azure AI Foundry — preferred)")
+        print("  AZURE_OPENAI_ENDPOINT        (Azure OpenAI Service)")
+        print("  OPENAI_API_KEY               (direct OpenAI fallback)")
         sys.exit(1)
 
     # Resolve CSV path
     csv_path = args.source
     if not os.path.isabs(csv_path):
-        # Try relative to cwd first, then data/sources/
         if not os.path.exists(csv_path):
             alt = os.path.join("data", "sources", csv_path)
             if os.path.exists(alt):
@@ -46,7 +60,6 @@ def main() -> None:
         print(f"ERROR: CSV file not found: {csv_path}")
         sys.exit(1)
 
-    # Import here to avoid triggering agent construction before env is loaded
     from src.orchestrator import run_pipeline
 
     result = asyncio.run(run_pipeline(args.question, csv_path))

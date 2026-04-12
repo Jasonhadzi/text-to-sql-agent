@@ -9,7 +9,7 @@ import sqlglot
 from sqlglot import exp
 
 from src.models.schemas import SchemaSummary, ValidationIssue, ValidationResult
-from src.tools.schema_introspect import ALLOWED_TABLES
+from src.tools.schema_introspect import get_allowlisted_tables
 
 # AST node types that represent dangerous operations
 _DANGEROUS_NODES = (
@@ -29,7 +29,13 @@ _DANGEROUS_NODES = (
 DEFAULT_LIMIT = 5000
 
 
-def validate_sql(sql: str, schema: SchemaSummary) -> ValidationResult:
+def validate_sql(
+    sql: str,
+    schema: SchemaSummary,
+    *,
+    dialect: str = "duckdb",
+    use_fabric: bool = False,
+) -> ValidationResult:
     """Validate *sql* against safety rules and the provided schema.
 
     Returns a ``ValidationResult`` — check ``has_blockers`` before executing.
@@ -54,7 +60,7 @@ def validate_sql(sql: str, schema: SchemaSummary) -> ValidationResult:
     # 2. Parse with sqlglot
     # ------------------------------------------------------------------
     try:
-        parsed = sqlglot.parse(stripped, dialect="duckdb")
+        parsed = sqlglot.parse(stripped, dialect=dialect)
     except sqlglot.errors.ParseError as exc:
         issues.append(
             ValidationIssue(
@@ -114,7 +120,8 @@ def validate_sql(sql: str, schema: SchemaSummary) -> ValidationResult:
         if cte.alias:
             cte_names.add(cte.alias.lower())
 
-    allowed_lower = {t.lower() for t in ALLOWED_TABLES} | cte_names
+    allowed = get_allowlisted_tables(use_fabric=use_fabric)
+    allowed_lower = {t.lower() for t in allowed} | cte_names
 
     for tbl in tree.find_all(exp.Table):
         tbl_name = tbl.name.lower() if tbl.name else ""
@@ -123,7 +130,7 @@ def validate_sql(sql: str, schema: SchemaSummary) -> ValidationResult:
                 ValidationIssue(
                     severity="blocker",
                     category="schema",
-                    message=f"Table '{tbl.name}' is not in the allowed table list: {ALLOWED_TABLES}",
+                    message=f"Table '{tbl.name}' is not in the allowed table list: {sorted(allowed)}",
                 )
             )
 
@@ -156,31 +163,37 @@ def validate_sql(sql: str, schema: SchemaSummary) -> ValidationResult:
 
     limit_injected = False
     if not has_limit and not is_small_aggregate:
+        limit_hint = (
+            f"a row cap ({DEFAULT_LIMIT}) will be injected (T-SQL: TOP / FETCH)"
+            if dialect == "tsql"
+            else f"a LIMIT {DEFAULT_LIMIT} will be injected"
+        )
         issues.append(
             ValidationIssue(
                 severity="warn",
                 category="schema",
-                message=f"No LIMIT clause found. A LIMIT {DEFAULT_LIMIT} will be injected.",
+                message=f"No row limit found. {limit_hint}.",
             )
         )
         limit_injected = True
 
-    return _build_result(issues, limit_injected=limit_injected)
+    return _build_result(issues, limit_injected=limit_injected, dialect=dialect)
 
 
-def inject_limit(sql: str, limit: int = DEFAULT_LIMIT) -> str:
-    """Append a LIMIT clause if one is not already present."""
+def inject_limit(sql: str, limit: int = DEFAULT_LIMIT, *, dialect: str = "duckdb") -> str:
+    """Append a LIMIT clause (DuckDB) or TOP / FETCH (T-SQL) if not already present."""
     try:
-        parsed = sqlglot.parse(sql.strip().rstrip(";"), dialect="duckdb")
+        parsed = sqlglot.parse(sql.strip().rstrip(";"), dialect=dialect)
         if parsed and parsed[0] is not None:
             tree = parsed[0]
             if tree.find(exp.Limit) is None:
                 tree = tree.limit(limit)
-            return tree.sql(dialect="duckdb")
+            return tree.sql(dialect=dialect)
     except Exception:
         pass
-    # Fallback: simple string append
     stripped = sql.strip().rstrip(";")
+    if dialect == "tsql":
+        return f"{stripped}\nOFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY"
     return f"{stripped}\nLIMIT {limit}"
 
 
@@ -192,8 +205,16 @@ def inject_limit(sql: str, limit: int = DEFAULT_LIMIT) -> str:
 def _build_result(
     issues: list[ValidationIssue],
     limit_injected: bool = False,
+    dialect: str = "duckdb",
 ) -> ValidationResult:
     has_blocker = any(i.severity == "blocker" for i in issues)
+    fix_msg = None
+    if limit_injected:
+        fix_msg = (
+            "Row cap was auto-injected (T-SQL)"
+            if dialect == "tsql"
+            else "LIMIT was auto-injected"
+        )
     return ValidationResult(
         is_safe=not has_blocker,
         is_read_only=not any(i.category == "readonly" and i.severity == "blocker" for i in issues),
@@ -201,5 +222,5 @@ def _build_result(
         syntax_ok=not any(i.category == "syntax" and i.severity == "blocker" for i in issues),
         schema_ok=not any(i.category == "schema" and i.severity == "blocker" for i in issues),
         issues=issues,
-        recommended_fix="LIMIT was auto-injected" if limit_injected else None,
+        recommended_fix=fix_msg,
     )

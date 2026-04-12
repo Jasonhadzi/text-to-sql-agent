@@ -8,7 +8,8 @@ from typing import Any, List, Dict
 
 from src.orchestrator import run_pipeline
 from src.models.schemas import FinalResponse, ColumnInfo
-from src.tools.schema_introspect import load_csv_to_duckdb
+from src.connectors.fabric_connector import USE_FABRIC, execute_sql_fabric, get_fabric_connection
+from src.tools.schema_introspect import get_active_datasource, load_csv_to_duckdb, load_datasource_config
 from src.tools.sql_execute import execute_sql
 from src.chat_store import init_db, save_chat, get_recent_chats, delete_chat
 
@@ -92,9 +93,29 @@ async def handle_query(request: QueryRequest):
     # deterministic query over the CSV so the UI still receives
     # grounded data and SQL.
     if not os.environ.get("OPENAI_API_KEY"):
-        conn = load_csv_to_duckdb(csv_path)
-        sql = "SELECT * FROM retail_transactions_typed LIMIT 20"
-        exec_result = execute_sql(conn, sql, run_id="no_api_key")
+        if USE_FABRIC:
+            ds = get_active_datasource(load_datasource_config(), use_fabric=True)
+            table = ""
+            if ds:
+                table = str(ds.get("default_table") or "")
+                if not table and ds.get("tables"):
+                    table = str(ds["tables"][0].get("name") or "")
+            if not table:
+                table = "tbltransactions"
+            sql = f"SELECT TOP (20) * FROM {table}"
+            conn = get_fabric_connection()
+            try:
+                exec_result = execute_sql_fabric(conn, sql, run_id="no_api_key")
+            finally:
+                conn.close()
+            citations = [table]
+            data_backend = "fabric"
+        else:
+            conn = load_csv_to_duckdb(csv_path)
+            sql = "SELECT * FROM retail_transactions_typed LIMIT 20"
+            exec_result = execute_sql(conn, sql, run_id="no_api_key")
+            citations = ["retail_transactions_typed"]
+            data_backend = "duckdb"
 
         preview_rows = exec_result.preview_rows
         columns = exec_result.columns
@@ -110,10 +131,11 @@ async def handle_query(request: QueryRequest):
         return {
             "answer": answer,
             "sql": sql,
-            "citations": ["retail_transactions_typed"],
+            "citations": citations,
             "chartData": chart_data,
             "previewRows": preview_rows,
             "columns": [c.model_dump() for c in columns],
+            "dataBackend": data_backend,
         }
 
     # Delegate to the existing multi‑agent text‑to‑SQL pipeline.
@@ -125,8 +147,11 @@ async def handle_query(request: QueryRequest):
     # Build grounded chart data + preview table
     chart_data = _build_chart_data(final.preview_rows, final.columns)
 
-    # For now, we only expose a single logical data source (the retail table).
-    citations = ["retail_transactions_typed"]
+    citations = (
+        final.citation_tables
+        if final.citation_tables
+        else (["retail_transactions_typed"] if final.data_backend == "duckdb" else [])
+    )
 
     return {
         "answer": final.answer,
@@ -135,6 +160,7 @@ async def handle_query(request: QueryRequest):
         "chartData": chart_data,
         "previewRows": final.preview_rows,
         "columns": [c.model_dump() for c in final.columns],
+        "dataBackend": final.data_backend or ("fabric" if USE_FABRIC else "duckdb"),
     }
 
 

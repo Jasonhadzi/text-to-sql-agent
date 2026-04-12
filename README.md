@@ -1,8 +1,15 @@
 # Text-to-SQL Agent
 
-A multi-agent system that answers natural language questions about your data by generating, validating, and executing SQL queries — then producing a human-friendly analysis.
+A multi-agent system that answers natural language questions about your data by generating, validating, and executing SQL — then producing a human-friendly analysis.
 
-Built with [OpenAI Agents SDK](https://openai.github.io/openai-agents-python/), [DuckDB](https://duckdb.org/), and [sqlglot](https://github.com/tobymao/sqlglot).
+Built with the [OpenAI Agents SDK](https://openai.github.io/openai-agents-python/), [sqlglot](https://github.com/tobymao/sqlglot), and **either**:
+
+| Backend | When it runs | Primary table(s) |
+|--------|----------------|------------------|
+| **DuckDB** + CSV | Fabric env vars **not** set | `retail_transactions` / `retail_transactions_typed` (in-memory) |
+| **Microsoft Fabric** (ODBC) | `FABRIC_CONNECTION_STRING` **or** `FABRIC_SERVER` + `FABRIC_DATABASE` + Azure SP vars | Configured in `datasource_config.json` (e.g. `dbo.tbltransactions`) |
+
+Both paths use the **same orchestrator** (guardrails → router → NLQ → validation → execute → RAG). SQL dialect is **DuckDB** locally and **T-SQL** against Fabric.
 
 ## How It Works
 
@@ -10,44 +17,55 @@ Built with [OpenAI Agents SDK](https://openai.github.io/openai-agents-python/), 
 User Question
      │
      ▼
-┌─────────────────────┐
-│ BusinessContextAgent │  ← Understands the business intent
-└──────────┬──────────┘
+┌──────────────────────┐
+│ Input Guardrail      │  ← Safety patterns
+└──────────┬───────────┘
            ▼
-┌─────────────────────┐
-│ TechnicalSpecAgent   │  ← Rewrites question as a precise SQL task
-└──────────┬──────────┘
+┌──────────────────────┐
+│ Clarification Agent  │  ← Is the question clear?
+└──────────┬───────────┘
            ▼
-┌─────────────────────┐
-│ SQLWriterAgent       │  ← Generates DuckDB SQL (does NOT execute)
-└──────────┬──────────┘
+┌──────────────────────┐
+│ Query Router Agent   │  ← Tables from datasource_config (exact names)
+└──────────┬───────────┘
            ▼
-┌─────────────────────┐
-│ Deterministic        │  ← sqlglot AST: read-only, single statement,
-│ SQL Validator        │    table/column allowlist, LIMIT injection
-├─────────────────────┤
-│ SQLGuardrailAgent    │  ← LLM advisory: injection, alignment, PII
-└──────────┬──────────┘
-           ▼  (retry up to 3x on validation failure)
-┌─────────────────────┐
-│ SQL Executor         │  ← Runs query on DuckDB, saves results
-└──────────┬──────────┘
+┌──────────────────────┐
+│ NLQ Agent            │  ← One SQL candidate (DuckDB or T-SQL)
+└──────────┬───────────┘
            ▼
-┌─────────────────────┐
-│ AnalysisAgent        │  ← Writes analytical report from results
-└──────────┬──────────┘
+┌──────────────────────┐
+│ SQL Validator        │  ← sqlglot: read-only, allowlist, row cap
+│ (deterministic)      │
+└──────────┬───────────┘
            ▼
-┌─────────────────────┐
-│ SynthesisAgent       │  ← Merges everything into final answer
-└─────────────────────┘
+┌──────────────────────┐
+│ SQL Executor         │  ← DuckDB or Fabric (pyodbc)
+└──────────┬───────────┘
+           ▼
+┌──────────────────────┐
+│ RAG Agent            │  ← Grounded answer from preview rows
+└──────────┬───────────┘
+           ▼
+┌──────────────────────┐
+│ Output Guardrail     │
+└──────────────────────┘
 ```
 
-Every step is logged to `outputs/runs/{run_id}/events.jsonl` for full auditability.
+Stages are logged to `outputs/runs/{run_id}/events.jsonl`.
+
+## DuckDB vs Fabric (Option A — parity)
+
+- **Same questions** map to the **same column names** on both sides for the retail-style dataset.
+- **Differences:** The DuckDB view adds **`date_parsed`** / **`time_parsed`**. Fabric tables (e.g. `tbltransactions`) typically have **`Date`** as a string and **`Time`** as `DATETIME2` — the NLQ prompt and schema preamble tell the model to use **`TRY_CONVERT` / `CAST`** for date filters on Fabric, not `date_parsed`.
+- **Switching backends:** Unset Fabric-related env vars to use DuckDB + CSV; set them to use the warehouse. `default_datasource` in `datasource_config.json` should match your intent; the orchestrator logs a **warning** if it disagrees with the active backend.
+
+API responses (`bridge_server`) include **`citations`** (routed table names) and **`dataBackend`** (`duckdb` | `fabric`) when the full pipeline runs.
 
 ## Prerequisites
 
 - Python 3.11+
-- An OpenAI API key
+- An OpenAI API key (for the full agent pipeline)
+- **Fabric only:** [ODBC Driver 18 for SQL Server](https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server) and a **service principal** with access to the workspace (see `src/connectors/fabric_connector.py`)
 
 ## Setup
 
@@ -58,31 +76,45 @@ cd text-to-sql-agent
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
+# Optional — Microsoft Fabric / pyodbc
+pip install -e ".[fabric]"
 ```
 
 2. **Set your API key:**
 
 ```bash
 cp .env.example .env
-# Edit .env and add your OPENAI_API_KEY
+# Edit .env — at minimum OPENAI_API_KEY for agents
 ```
 
-3. **Place your data:**
+3. **Local data (DuckDB path):**
 
-The default data source is `new_retail_data 1.csv` in the project root. It's automatically symlinked into `data/sources/`.
+Default CSV is `new_retail_data 1.csv` in the project root (or under `data/sources/`). Used only when Fabric is **not** configured.
+
+4. **Fabric (live warehouse):**
+
+Set either `FABRIC_CONNECTION_STRING` **or** `FABRIC_SERVER` + `FABRIC_DATABASE` + `AZURE_TENANT_ID` + `AZURE_CLIENT_ID` + `AZURE_CLIENT_SECRET`. List your warehouse tables under the `type: "fabric"` datasource in `datasource_config.json` and set `default_table`.
+
+## Configuration
+
+| File | Purpose |
+|------|---------|
+| `src/config/datasource_config.json` | Multiple datasources (`fabric` vs `duckdb`), allowed tables, `default_datasource`, optional `connection_env` key hints for env vars |
+| `src/config/schema_config.json` | Column descriptions, PII, relationships — merged at runtime with introspected types |
+| `src/config/allowlist_config.json` | Fallback allowlist if datasource config lists no tables |
 
 ## Usage
 
 ```bash
-# Activate virtualenv
 source .venv/bin/activate
 
-# Ask a question
+# Local DuckDB + CSV — unset FABRIC_* / FABRIC_CONNECTION_STRING / AZURE_* used only for Fabric
 python -m src.app --question "What are the top 5 product categories by total revenue?"
 
-# Specify a different CSV
 python -m src.app --question "Show monthly sales trends" --source "path/to/data.csv"
 ```
+
+With Fabric env vars set, the **same command** runs against the warehouse; SQL is validated as **T-SQL** and row caps use **TOP** / **FETCH**.
 
 ### Example Questions
 
@@ -90,8 +122,6 @@ python -m src.app --question "Show monthly sales trends" --source "path/to/data.
 python -m src.app -q "What are the top 5 product categories by total revenue?"
 python -m src.app -q "What is the average order value by country?"
 python -m src.app -q "Show me monthly revenue trends for 2023"
-python -m src.app -q "Which shipping method has the highest average rating?"
-python -m src.app -q "What is the revenue split between customer segments?"
 ```
 
 ## Running the Web UI
@@ -126,29 +156,25 @@ Open `http://localhost:3000`, type a question, and confirm the answer, chart, an
 
 ## Output
 
-Each run creates artifacts in `outputs/runs/{run_id}/`:
+Each run writes under `outputs/runs/{run_id}/`:
 
 | File | Description |
 |------|-------------|
-| `events.jsonl` | Full event log (every agent input/output) |
-| `schema.json` | Introspected database schema |
-| `business_context.json` | Extracted business context |
-| `technical_spec.json` | SQL task specification |
-| `query.sql` | The executed SQL query |
-| `result.parquet` | Full query results |
-| `result_preview.json` | First 20 rows (PII redacted) |
-| `analysis.json` | Structured analytical report |
-| `final.json` | Complete final response |
-| `final.md` | Formatted Markdown report |
+| `events.jsonl` | Append-only log of pipeline stages |
+| `schema.json` | Schema shown to agents (introspected + merged from `schema_config.json`) |
+| `query.sql` | Validated SQL (after any row-cap injection) |
+| `result.parquet` | Full result set (**DuckDB** path, when `COPY` succeeds) |
+| `result.json` | Full result set (**Fabric** path, or DuckDB fallback) |
+| `result_preview.json` | First rows of the result |
+| `final.json` / `final.md` | Structured + Markdown final response |
 
 ## Safety Guarantees
 
-- **Read-only SQL:** Deterministic AST validation (sqlglot) blocks any DML/DDL before execution
-- **Single statement only:** Multi-statement SQL is rejected
-- **Table/column allowlist:** Only the loaded data table is queryable
-- **PII minimization:** Email, Phone, Address, Name are redacted from previews by default
-- **Prompt injection screening:** Basic pattern matching + LLM advisory review
-- **Automatic LIMIT:** Queries without LIMIT get a safe default injected
+- **Read-only SQL:** AST validation blocks DML/DDL; Fabric connector allows only `SELECT` / `WITH` and uses ODBC **read intent** where applicable
+- **Single statement:** Semicolons that separate statements are rejected
+- **Table allowlist:** Tables must appear under the **active** backend in `datasource_config.json`
+- **PII:** Sensitive columns are redacted in previews per schema / PII config
+- **Row cap:** `LIMIT` (DuckDB) or **TOP** / **FETCH** (T-SQL)
 
 ## Running Tests
 
@@ -156,23 +182,26 @@ Each run creates artifacts in `outputs/runs/{run_id}/`:
 pytest tests/ -v
 ```
 
+Use `PYTHONPATH=.` from the repo root if you run pytest without an editable install.
+
 ## Project Structure
 
 ```
 src/
-  app.py              # CLI entry point
-  orchestrator.py     # Pipeline state machine
-  agents/             # 6 LLM agent definitions
-  tools/              # Deterministic tools (schema, validate, execute, log, redact)
-  models/schemas.py   # Pydantic I/O contracts
-  prompts/            # Agent prompt templates (Markdown)
-tests/                # Unit tests for tools
-data/sources/         # CSV data files
-outputs/runs/         # Per-run artifacts
+  app.py                 # CLI entry point
+  orchestrator.py        # Pipeline (sets data_backend + citation_tables on FinalResponse)
+  agents/                # Clarification, query router, NLQ, RAG, …
+  connectors/            # Azure OpenAI, Fabric (ODBC)
+  tools/                 # Schema, validate, execute, log, redact
+  config/                # datasource_config.json, schema_config.json, …
+  models/schemas.py      # Pydantic I/O contracts
+  prompts/               # Agent prompt templates (Markdown)
+tests/
+data/sources/            # CSV files (DuckDB)
+outputs/runs/            # Per-run artifacts
+bridge_server.py         # FastAPI (optional); honors DuckDB vs Fabric for /ask
 ```
 
 ## Architecture
 
-The system follows the **hub-and-spoke / agent-as-tool** pattern from the [OpenAI Agents SDK cookbook](https://github.com/openai/openai-cookbook). The orchestrator drives each agent sequentially (with parallel steps where dependencies allow), using structured Pydantic output types to ensure reliable data flow between stages.
-
-Key design decision: the **deterministic SQL validator** (sqlglot AST inspection) is the hard security gate. The LLM evaluator agent provides advisory feedback but is never the sole guardrail.
+The orchestrator follows the [OpenAI Agents SDK](https://openai.github.io/openai-agents-python/) pattern: sequential `Runner.run` calls with structured outputs. The **deterministic SQL validator** (sqlglot) is the hard gate before execution; LLM steps do not replace that check.

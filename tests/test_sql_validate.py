@@ -137,13 +137,19 @@ class TestLimitInjection:
             "SELECT * FROM retail_transactions_typed",
             schema,
         )
-        assert any("LIMIT" in (i.message or "") for i in result.issues)
+        assert any("limit" in (i.message or "").lower() for i in result.issues)
 
     def test_inject_limit_function(self) -> None:
         sql = "SELECT * FROM retail_transactions_typed"
-        result = inject_limit(sql, 100)
+        result = inject_limit(sql, 100, dialect="duckdb")
         assert "100" in result
         assert "LIMIT" in result.upper()
+
+    def test_inject_limit_tsql(self) -> None:
+        sql = "SELECT * FROM retail_transactions_typed"
+        result = inject_limit(sql, 100, dialect="tsql")
+        assert "100" in result
+        assert "TOP" in result.upper() or "FETCH" in result.upper()
 
     def test_inject_limit_preserves_existing(self) -> None:
         sql = "SELECT * FROM retail_transactions_typed LIMIT 10"

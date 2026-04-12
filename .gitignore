@@ -34,3 +34,9 @@ Thumbs.db
 !ARCHITECTURE_AT_A_GLANCE.md
 !IMPLEMENTATION_PLAN.md
 !src/prompts/*.md
+
+# Frontend (cloned separately as its own git repo)
+text-to-sql-agent-frontend/
+
+# Runtime SQLite database (created by bridge_server.py)
+chat_history.db

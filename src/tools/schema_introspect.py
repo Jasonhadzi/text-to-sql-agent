@@ -32,7 +32,9 @@ def _load_pii_columns() -> set[str]:
         path = os.path.join(_CONFIG_DIR, "pii_config.json")
         with open(path, "r") as f:
             config = json.load(f)
-        return {c.lower() for c in config.get("pii_columns", [])}
+        # Support both new schema (pii_keywords) and legacy (pii_columns)
+        keywords = config.get("pii_keywords", config.get("pii_columns", []))
+        return {c.lower() for c in keywords}
     except (FileNotFoundError, json.JSONDecodeError):
         return {"name", "email", "phone", "address"}
 
@@ -42,6 +44,14 @@ def _allowed_tables_fallback() -> set[str]:
         path = os.path.join(_CONFIG_DIR, "allowlist_config.json")
         with open(path, "r") as f:
             config = json.load(f)
+        # Support new datasource-aware schema
+        if "datasources" in config:
+            tables: set[str] = set()
+            for ds in config["datasources"]:
+                tables.update(ds.get("allowed_tables", []))
+            if tables:
+                return tables
+        # Legacy flat schema
         got = set(config.get("allowed_tables", []))
         if got:
             return got

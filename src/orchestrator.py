@@ -25,6 +25,7 @@ from src.connectors.fabric_connector import (
 )
 from src.guardrails.input_guardrail import check_input_safety, is_hard_block
 from src.guardrails.output_guardrail import check_output_safety, has_critical_issues
+from src.guardrails.sql_guardrail import check_sql
 from src.models.schemas import (
     ClarificationResult,
     FinalResponse,
@@ -96,12 +97,17 @@ def _attach_backend_meta(
     resp.citation_tables = _citation_tables_for_api(schema, routing)
 
 
-async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
+async def run_pipeline(
+    question: str,
+    csv_path: str,
+    conversation_history: list | None = None,
+) -> FinalResponse:
     """Execute the full text-to-SQL agent pipeline and return a ``FinalResponse``."""
 
     run_id = uuid4().hex[:12]
     logger = RunLogger(run_id)
     logger.log("setup", "run_started", {"question": question, "csv_path": csv_path})
+    history_text = _format_conversation_history(conversation_history)
     print(f"\n[run_id={run_id}] Starting pipeline...")
 
     # Get Azure run config (None if not configured — uses default OpenAI)
@@ -155,6 +161,7 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
     # ------------------------------------------------------------------
     print("[Stage 2] Clarification Agent checking question clarity...")
     clarification_input = (
+        f"{history_text}"
         f"## User Question\n{question}\n\n"
         f"## Database Schema\n{schema_text}"
     )
@@ -196,7 +203,8 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
     print(f"  Routed to tables: {routing.relevant_tables}")
 
     # Filter schema to only include routed tables
-    filtered_schema_text = _filter_schema_for_tables(schema_text, routing.relevant_tables)
+    filtered_schema = _filter_schema(schema, routing.relevant_tables)
+    filtered_schema_text = _schema_prompt_preamble(dialect) + filtered_schema.format_for_prompt()
 
     # ------------------------------------------------------------------
     # Stage 4 — NLQ Agent: question → SQL (with retry loop)
@@ -208,6 +216,7 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
         print(f"[Stage 4] NLQ Agent generating SQL (attempt {attempt + 1}/{MAX_SQL_ATTEMPTS})...")
 
         nlq_input = (
+            f"{history_text}"
             f"## User Question\n{question}\n\n"
             f"## Database Schema\n{filtered_schema_text}"
         )
@@ -221,8 +230,19 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
         logger.log("nlq_agent", f"attempt_{attempt}", sql_candidate)
         print(f"  SQL: {sql_candidate.sql[:120]}...")
 
-        # ---- Stage 5: SQL Guardrail — deterministic validation (hard gate) ----
-        print(f"[Stage 5] SQL Guardrail validating (attempt {attempt + 1})...")
+        # ---- Stage 5a: SQL Guardrail — regex/allowlist check ----
+        print(f"[Stage 5a] SQL Guardrail allowlist check (attempt {attempt + 1})...")
+        datasource_name = routing.datasource if routing else "default"
+        sql_guard = check_sql(sql_candidate.sql, datasource=datasource_name)
+        logger.log("sql_guardrail_check", f"attempt_{attempt}", sql_guard)
+
+        if not sql_guard["allowed"]:
+            errors_feedback = f"- {sql_guard['reason']}"
+            print(f"  [BLOCKED] {sql_guard['reason']}")
+            continue
+
+        # ---- Stage 5b: SQL Guardrail — AST validation (hard gate) ----
+        print(f"[Stage 5b] SQL AST validation (attempt {attempt + 1})...")
         det_val = validate_sql(
             sql_candidate.sql,
             schema,
@@ -292,6 +312,7 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
     # ------------------------------------------------------------------
     print("[Stage 7] RAG Agent generating answer...")
     rag_input = (
+        f"{history_text}"
         f"## User Question\n{question}\n\n"
         f"## SQL Query\n```sql\n{validated_sql}\n```\n\n"
         f"## Execution Summary\n{exec_result.row_count} rows returned in {exec_result.execution_ms}ms\n\n"
@@ -351,6 +372,27 @@ async def run_pipeline(question: str, csv_path: str) -> FinalResponse:
 # ---------------------------------------------------------------------------
 
 
+def _format_conversation_history(conversation_history: list | None) -> str:
+    """Format recent conversation turns into a prompt section."""
+    if not conversation_history:
+        return ""
+    lines = ["## Conversation History (most recent exchanges)\n"]
+    for i, turn in enumerate(conversation_history, 1):
+        lines.append(f"### Exchange {i}")
+        lines.append(f"User: {turn.question}")
+        lines.append(f"Answer: {turn.answer}")
+        if turn.sql:
+            lines.append(f"SQL used: {turn.sql}")
+        lines.append("")
+    lines.append(
+        "Use this conversation history to resolve references like "
+        '"what about...", "for that category", "the same but...", etc. '
+        "If the current question refers to entities or metrics from prior exchanges, "
+        "incorporate that context.\n\n"
+    )
+    return "\n".join(lines)
+
+
 def _schema_prompt_preamble(dialect: str) -> str:
     if dialect == "tsql":
         return (
@@ -367,22 +409,29 @@ def _schema_prompt_preamble(dialect: str) -> str:
     )
 
 
-def _filter_schema_for_tables(schema_text: str, tables: list[str]) -> str:
-    """Filter schema text to only include the specified tables.
+def _filter_schema(schema: SchemaSummary, tables: list[str]) -> SchemaSummary:
+    """Return a SchemaSummary containing only the specified tables.
 
-    If the table list matches what's in the schema, returns the original text.
-    This is a best-effort filter — if parsing fails, returns the full schema.
+    Falls back to the full schema when no tables match or the list is empty.
     """
     if not tables:
-        return schema_text
+        return schema
 
-    # Simple approach: if the schema is already for the right table, return as-is
-    # (current dataset only has one table anyway)
-    for table in tables:
-        if table in schema_text:
-            return schema_text
+    table_set = {t.lower() for t in tables}
+    filtered = [t for t in schema.tables if t.name.lower() in table_set]
 
-    return schema_text
+    if not filtered:
+        return schema
+
+    rec = schema.recommended_table
+    if rec and rec.lower() not in table_set:
+        rec = filtered[0].name
+
+    return SchemaSummary(
+        tables=filtered,
+        recommended_table=rec,
+        notes=list(schema.notes),
+    )
 
 
 def _format_final_md(resp: FinalResponse) -> str:

@@ -15,7 +15,9 @@ def _load_pii_columns() -> set[str]:
         path = os.path.join(_CONFIG_DIR, "pii_config.json")
         with open(path, "r") as f:
             config = json.load(f)
-        return {c.lower() for c in config.get("pii_columns", [])}
+        # Support both new schema (pii_keywords) and legacy (pii_columns)
+        keywords = config.get("pii_keywords", config.get("pii_columns", []))
+        return {c.lower() for c in keywords}
     except (FileNotFoundError, json.JSONDecodeError):
         return {"name", "email", "phone", "address"}
 

@@ -202,7 +202,8 @@ async def run_pipeline(
     print(f"  Routed to tables: {routing.relevant_tables}")
 
     # Filter schema to only include routed tables
-    filtered_schema_text = _filter_schema_for_tables(schema_text, routing.relevant_tables)
+    filtered_schema = _filter_schema(schema, routing.relevant_tables)
+    filtered_schema_text = _schema_prompt_preamble(dialect) + filtered_schema.format_for_prompt()
 
     # ------------------------------------------------------------------
     # Stage 4 — NLQ Agent: question → SQL (with retry loop)
@@ -396,22 +397,29 @@ def _schema_prompt_preamble(dialect: str) -> str:
     )
 
 
-def _filter_schema_for_tables(schema_text: str, tables: list[str]) -> str:
-    """Filter schema text to only include the specified tables.
+def _filter_schema(schema: SchemaSummary, tables: list[str]) -> SchemaSummary:
+    """Return a SchemaSummary containing only the specified tables.
 
-    If the table list matches what's in the schema, returns the original text.
-    This is a best-effort filter — if parsing fails, returns the full schema.
+    Falls back to the full schema when no tables match or the list is empty.
     """
     if not tables:
-        return schema_text
+        return schema
 
-    # Simple approach: if the schema is already for the right table, return as-is
-    # (current dataset only has one table anyway)
-    for table in tables:
-        if table in schema_text:
-            return schema_text
+    table_set = {t.lower() for t in tables}
+    filtered = [t for t in schema.tables if t.name.lower() in table_set]
 
-    return schema_text
+    if not filtered:
+        return schema
+
+    rec = schema.recommended_table
+    if rec and rec.lower() not in table_set:
+        rec = filtered[0].name
+
+    return SchemaSummary(
+        tables=filtered,
+        recommended_table=rec,
+        notes=list(schema.notes),
+    )
 
 
 def _format_final_md(resp: FinalResponse) -> str:

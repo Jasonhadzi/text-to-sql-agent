@@ -12,6 +12,8 @@ from src.connectors.fabric_connector import USE_FABRIC, execute_sql_fabric, get_
 from src.tools.schema_introspect import get_active_datasource, load_csv_to_duckdb, load_datasource_config
 from src.tools.sql_execute import execute_sql
 from src.chat_store import init_db, save_chat, get_recent_chats, delete_chat
+from src.anomaly_store import init_anomaly_db, get_recent_findings
+from src.anomaly_runner import run_anomaly_detection, start_anomaly_scheduler
 
 
 load_dotenv()
@@ -88,8 +90,11 @@ def _build_chart_data(preview_rows: List[Dict[str, Any]], columns: List[ColumnIn
 
 
 @app.on_event("startup")
-def on_startup() -> None:
+async def on_startup() -> None:
     init_db()
+    init_anomaly_db()
+    if os.environ.get("ANOMALY_ENABLED", "").lower() in ("1", "true", "yes"):
+        start_anomaly_scheduler()
 
 
 @app.post("/ask")
@@ -192,6 +197,28 @@ def delete_history_item(chat_id: int):
     """Delete a single history item by id."""
     delete_chat(chat_id)
     return {"status": "ok", "id": chat_id}
+
+
+@app.get("/anomalies")
+def get_anomalies(limit: int = 10):
+    """Return the most recent anomaly findings."""
+    findings = get_recent_findings(limit=limit)
+    return {"findings": findings}
+
+
+@app.post("/anomalies/run")
+async def trigger_anomaly_run():
+    """Trigger an on-demand anomaly detection run."""
+    report = await run_anomaly_detection()
+    if report is None:
+        return {"status": "error", "message": "Anomaly detection failed — check server logs"}
+    return {
+        "status": "ok",
+        "severity": report.severity,
+        "summary": report.summary,
+        "anomaly_count": len(report.anomalies),
+        "trend_count": len(report.trends),
+    }
 
 
 if __name__ == "__main__":

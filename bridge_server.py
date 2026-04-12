@@ -156,11 +156,7 @@ async def handle_query(request: QueryRequest):
     # Build grounded chart data + preview table
     chart_data = _build_chart_data(final.preview_rows, final.columns)
 
-    citations = (
-        final.citation_tables
-        if final.citation_tables
-        else (["retail_transactions_typed"] if final.data_backend == "duckdb" else [])
-    )
+    citations = final.citation_tables
 
     return {
         "answer": final.answer,

@@ -86,49 +86,6 @@ class SchemaSummary(BaseModel):
 # Agent I/O models
 # ---------------------------------------------------------------------------
 
-class TimeRange(BaseModel):
-    start: str | None = None
-    end: str | None = None
-
-
-class FilterSpec(BaseModel):
-    field: str
-    op: str = "="
-    value: str
-
-
-class BusinessContext(BaseModel):
-    business_goal: str
-    primary_metric: str
-    dimensions: list[str] = Field(default_factory=list)
-    time_range: TimeRange = Field(default_factory=TimeRange)
-    filters: list[FilterSpec] = Field(default_factory=list)
-    grain: str = "transaction"
-    pii_required: bool = False
-    assumptions: list[str] = Field(default_factory=list)
-
-
-class SelectExpression(BaseModel):
-    expression: str
-    alias: str | None = None
-
-
-class OrderBySpec(BaseModel):
-    expression: str
-    direction: str = "asc"
-
-
-class TechnicalSpec(BaseModel):
-    task: str
-    select_expressions: list[SelectExpression] = Field(default_factory=list)
-    group_by: list[str] = Field(default_factory=list)
-    filters: list[str] = Field(default_factory=list)
-    order_by: list[OrderBySpec] = Field(default_factory=list)
-    limit: int = 100
-    notes: list[str] = Field(default_factory=list)
-    avoid_pii: bool = True
-
-
 class SQLCandidate(BaseModel):
     sql: str
     dialect: str = "duckdb"  # duckdb | tsql (Fabric / SQL Server)
@@ -167,13 +124,6 @@ class ExecutionResult(BaseModel):
     preview_rows: list[dict[str, Any]] = Field(default_factory=list)
     result_path: str = ""
     execution_ms: int = 0
-
-
-class AnalysisReport(BaseModel):
-    executive_summary: list[str] = Field(default_factory=list)
-    key_findings: list[str] = Field(default_factory=list)
-    caveats: list[str] = Field(default_factory=list)
-    suggested_next_questions: list[str] = Field(default_factory=list)
 
 
 class ClarificationResult(BaseModel):

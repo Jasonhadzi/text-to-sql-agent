@@ -152,7 +152,6 @@ src/
   anomaly_store.py       # SQLite anomaly findings persistence
   anomaly_runner.py      # Anomaly detection runner + background scheduler
 bridge_server.py         # FastAPI server (pairs with React frontend)
-config/                  # Root-level allowlist + PII config (used by SQL guardrail)
 tests/                   # pytest suite (13 test files, mocked agent calls)
 docs/                    # Architecture flowchart source (Mermaid)
 ```

@@ -17,6 +17,7 @@ data/warehouse.duckdb.wal
 
 # Run artifacts
 outputs/runs/
+logs/
 
 # IDE
 .vscode/

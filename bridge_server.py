@@ -6,6 +6,9 @@ from dotenv import load_dotenv
 import os
 from typing import Any, List, Dict
 
+# Load .env before importing modules that compute env-dependent globals.
+load_dotenv()
+
 from src.orchestrator import run_pipeline
 from src.models.schemas import FinalResponse, ColumnInfo
 from src.connectors.fabric_connector import USE_FABRIC, execute_sql_fabric, get_fabric_connection
@@ -14,9 +17,6 @@ from src.tools.sql_execute import execute_sql
 from src.chat_store import init_db, save_chat, get_recent_chats, delete_chat
 from src.anomaly_store import init_anomaly_db, get_recent_findings
 from src.anomaly_runner import run_anomaly_detection, start_anomaly_scheduler
-
-
-load_dotenv()
 
 app = FastAPI()
 

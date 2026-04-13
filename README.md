@@ -61,6 +61,50 @@ Stages are logged to `outputs/runs/{run_id}/events.jsonl`.
 
 API responses (`bridge_server`) include **`citations`** (routed table names) and **`dataBackend`** (`duckdb` | `fabric`) when the full pipeline runs.
 
+## Microsoft Fabric: how the app connects
+
+The production path talks to a **Microsoft Fabric Warehouse** over **ODBC** (not JDBC, and not the Fabric REST APIs for queries). Conceptually:
+
+1. **Endpoint** — `FABRIC_SERVER` is the **SQL analytics endpoint** hostname for your warehouse (the T-SQL endpoint Fabric exposes for the warehouse item). The app builds an ODBC connection to that host and to the logical database name `FABRIC_DATABASE`.
+2. **Authentication** — An **Azure AD application (service principal)** supplies `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and `AZURE_CLIENT_SECRET`. At runtime the connector uses **MSAL** to obtain an access token for `https://database.windows.net/.default` and connects with **read intent** (`ApplicationIntent=ReadOnly`). If that path fails, it can fall back to the ODBC driver’s **ActiveDirectoryServicePrincipal** flow.
+3. **Safety** — The connector only allows **`SELECT`** / **`WITH`** (CTEs). Table and column metadata for agents comes from **`INFORMATION_SCHEMA`** introspection for the tables you list under the Fabric datasource in `datasource_config.json`.
+4. **Alternative** — You can set **`FABRIC_CONNECTION_STRING`** instead of server + database + SP fields; the same read-only rules apply.
+
+**In Fabric / Azure you typically need:** the service principal **invited or added to the Fabric workspace** with at least a role that can read the warehouse (e.g. Viewer), **“Service principals can use Fabric APIs”** enabled where your tenant policy requires it (see Fabric Admin Portal), and a **valid client secret** on the app registration. Exact names for workspace and warehouse may differ from the sample values in `datasource_config.json` — update **`sql_schema`**, **`database`**, **`tables`**, and **`default_table`** to match your warehouse.
+
+## Cloning the repo and running locally
+
+After `git clone`:
+
+1. **Python environment**
+
+   ```bash
+   cd text-to-sql-agent
+   python3 -m venv .venv
+   source .venv/bin/activate   # Windows: .venv\Scripts\activate
+   pip install -e ".[dev]"
+   ```
+
+2. **Environment file**
+
+   ```bash
+   cp .env.example .env
+   ```
+
+   Set at least **`OPENAI_API_KEY`** for the full agent pipeline. Optional Azure OpenAI variables apply only if you route models through `src/connectors/azure_openai_connector.py`.
+
+3. **Choose a data backend**
+
+   - **Local DuckDB + CSV (no Fabric):** Leave Fabric variables **unset** or **empty** in `.env` (no `FABRIC_CONNECTION_STRING`, and no complete `FABRIC_SERVER` + `FABRIC_DATABASE` + `AZURE_TENANT_ID` + `AZURE_CLIENT_ID` + `AZURE_CLIENT_SECRET` set — that combination turns on Fabric mode). In `datasource_config.json`, set **`default_datasource`** to **`retail_local`**. Ensure the retail CSV exists (default: `new_retail_data 1.csv` in the project root or under `data/sources/`). You do **not** need `pip install -e ".[fabric]"` or the ODBC driver for this path.
+   - **Microsoft Fabric:** Install **[ODBC Driver 18 for SQL Server](https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server)** on your machine, then `pip install -e ".[fabric]"` (adds `pyodbc` and `msal`). In `.env`, set either **`FABRIC_CONNECTION_STRING`** **or** **`FABRIC_SERVER`** + **`FABRIC_DATABASE`** + **`AZURE_TENANT_ID`** + **`AZURE_CLIENT_ID`** + **`AZURE_CLIENT_SECRET`**. Align **`datasource_config.json`** with your warehouse (Fabric datasource entry, **`default_datasource`** pointing at it, correct `dbo` / table names).
+
+4. **Run**
+
+   - CLI: `python -m src.app --question "…"`
+   - API + UI: `python bridge_server.py` and the React app (see **Running the Web UI** below), or use `./start.sh` if you use that helper.
+
+If Fabric env vars are missing or incomplete, the app uses **DuckDB** automatically; if they are set correctly, it uses **T-SQL** against the warehouse.
+
 ## Prerequisites
 
 - Python 3.11+
@@ -69,31 +113,12 @@ API responses (`bridge_server`) include **`citations`** (routed table names) and
 
 ## Setup
 
-1. **Clone and install:**
+See **Cloning the repo and running locally** above for the full checklist. In short:
 
-```bash
-cd text-to-sql-agent
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-# Optional — Microsoft Fabric / pyodbc
-pip install -e ".[fabric]"
-```
-
-2. **Set your API key:**
-
-```bash
-cp .env.example .env
-# Edit .env — at minimum OPENAI_API_KEY for agents
-```
-
-3. **Local data (DuckDB path):**
-
-Default CSV is `new_retail_data 1.csv` in the project root (or under `data/sources/`). Used only when Fabric is **not** configured.
-
-4. **Fabric (live warehouse):**
-
-Set either `FABRIC_CONNECTION_STRING` **or** `FABRIC_SERVER` + `FABRIC_DATABASE` + `AZURE_TENANT_ID` + `AZURE_CLIENT_ID` + `AZURE_CLIENT_SECRET`. List your warehouse tables under the `type: "fabric"` datasource in `datasource_config.json` and set `default_table`.
+1. Install with `pip install -e ".[dev]"` (and `pip install -e ".[fabric]"` only if you use Fabric).
+2. Copy `.env.example` to `.env` and set **`OPENAI_API_KEY`** (and Fabric or Azure OpenAI variables as needed).
+3. For **DuckDB only:** point **`default_datasource`** at **`retail_local`** in `datasource_config.json` and use the default CSV (or `--source`).
+4. For **Fabric:** set **`FABRIC_CONNECTION_STRING`** **or** server + database + service-principal env vars; edit the Fabric datasource in `datasource_config.json` (tables, schema, `default_table`).
 
 ## Configuration
 

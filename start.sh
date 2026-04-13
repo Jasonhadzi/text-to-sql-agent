@@ -65,13 +65,23 @@ cleanup_stale_pidfile "$FRONTEND_PID_FILE"
 kill_port_if_busy 8000
 kill_port_if_busy 3000
 
-# Prefer python, fallback to python3.
-if command -v python >/dev/null 2>&1; then
+# Prefer project virtualenv Python, then fallback to PATH python.
+if [[ -x "$ROOT_DIR/.venv/bin/python" ]]; then
+  PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
+elif command -v python >/dev/null 2>&1; then
   PYTHON_BIN="python"
 elif command -v python3 >/dev/null 2>&1; then
   PYTHON_BIN="python3"
 else
   echo "Error: python/python3 not found in PATH."
+  exit 1
+fi
+
+# Make dependency failures explicit before launching uvicorn.
+if ! "$PYTHON_BIN" -c "import fastapi, uvicorn" >/dev/null 2>&1; then
+  echo "Error: backend dependencies are missing for $PYTHON_BIN."
+  echo "Install them with:"
+  echo "  $PYTHON_BIN -m pip install -e '.[fabric,azure]'"
   exit 1
 fi
 

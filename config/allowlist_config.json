@@ -24,6 +24,17 @@
       "allowed_operations": [
         "SELECT"
       ]
+    },
+    {
+      "name": "retail_local",
+      "type": "duckdb",
+      "allowed_tables": [
+        "retail_transactions",
+        "retail_transactions_typed"
+      ],
+      "allowed_operations": [
+        "SELECT"
+      ]
     }
   ]
 }

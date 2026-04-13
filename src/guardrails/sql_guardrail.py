@@ -24,7 +24,7 @@ from typing import Optional
 # Paths
 # ---------------------------------------------------------------------------
 
-_CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "config"
+_CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 _DEFAULT_ALLOWLIST_PATH = str(_CONFIG_DIR / "allowlist_config.json")
 
 

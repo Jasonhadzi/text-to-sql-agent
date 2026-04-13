@@ -1,5 +1,12 @@
 ## Implementation Plan — Multi-Agent Text-to-SQL System (CSV → SQL → Analysis)
 
+> **Note (April 2026):** This document reflects the original design. During
+> implementation several agents were consolidated: **BusinessContextAgent +
+> TechnicalSpecAgent + SQLWriterAgent → NLQ Agent**, **AnalysisAgent +
+> SynthesisAgent → RAG Agent**, and **SQLEvaluatorAgent → deterministic SQL
+> validation** (`sql_validate.py` + `sql_guardrail.py`). See
+> `ARCHITECTURE_AT_A_GLANCE.md` for the current pipeline.
+
 ### 0) What you’re building
 
 A **local** (CLI + optional API) system that:

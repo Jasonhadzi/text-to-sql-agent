@@ -3,6 +3,9 @@ uvicorn
 gunicorn
 openai
 openai-agents
+pydantic
+pyodbc
+msal
 sqlglot
 pandas
 duckdb

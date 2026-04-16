@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+gunicorn
+openai
+sqlglot
+pandas
+duckdb
+python-dotenv

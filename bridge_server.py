@@ -11,6 +11,7 @@ load_dotenv()
 
 from src.orchestrator import run_pipeline
 from src.models.schemas import FinalResponse, ColumnInfo
+from src.connectors.azure_openai_connector import setup_foundry_tracing
 from src.connectors.fabric_connector import USE_FABRIC, execute_sql_fabric, get_fabric_connection
 from src.tools.schema_introspect import get_active_datasource, load_csv_to_duckdb, load_datasource_config
 from src.tools.sql_execute import execute_sql
@@ -19,6 +20,7 @@ from src.anomaly_store import init_anomaly_db, get_recent_findings
 from src.anomaly_runner import run_anomaly_detection, start_anomaly_scheduler
 
 app = FastAPI()
+setup_foundry_tracing()
 
 app.add_middleware(
     CORSMiddleware,

@@ -105,6 +105,7 @@ def _probe_foundry_connection(endpoint: str, api_key: str | None) -> tuple[bool,
     Returns (reachable: bool, reason: str).
     Does NOT make an LLM call — just checks the host is up and the key is accepted.
     """
+    import ssl
     import urllib.request
     import urllib.error
 
@@ -114,8 +115,18 @@ def _probe_foundry_connection(endpoint: str, api_key: str | None) -> tuple[bool,
         headers["api-key"] = api_key
 
     req = urllib.request.Request(url, headers=headers, method="GET")
+    # Some Python installations on macOS have an empty/misconfigured default
+    # OpenSSL trust store. Prefer certifi when available so endpoint probing
+    # uses a known CA bundle.
+    ssl_context: ssl.SSLContext | None = None
     try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        import certifi  # type: ignore
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        ssl_context = None
+
+    try:
+        with urllib.request.urlopen(req, timeout=5, context=ssl_context) as resp:
             return True, f"HTTP {resp.status}"
     except urllib.error.HTTPError as e:
         if e.code in (401, 403, 404):
@@ -303,8 +314,21 @@ get_foundry_run_config = get_azure_run_config
 
 
 def setup_foundry_tracing() -> bool:
-    """Configure OpenTelemetry → Azure Monitor if FOUNDRY_TRACE=true."""
-    if os.getenv("FOUNDRY_TRACE", "").lower() not in ("1", "true", "yes"):
+    """Configure OpenTelemetry → Azure Monitor if FOUNDRY_TRACE=true.
+
+    Agents SDK tracing is disabled by default to avoid non-fatal tracing API
+    schema mismatches when the environment is not explicitly configured for
+    telemetry export.
+    """
+    tracing_enabled = os.getenv("FOUNDRY_TRACE", "").lower() in ("1", "true", "yes")
+    try:
+        from agents import set_tracing_disabled
+        set_tracing_disabled(not tracing_enabled)
+    except Exception:
+        # Do not block pipeline startup if tracing controls are unavailable.
+        pass
+
+    if not tracing_enabled:
         return False
 
     connection_string = os.getenv("AZURE_MONITOR_CONNECTION_STRING")

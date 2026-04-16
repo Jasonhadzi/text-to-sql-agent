@@ -2,7 +2,11 @@
 
 import base64
 
-from src.guardrails.input_guardrail import check_input_safety, is_hard_block
+from src.guardrails.input_guardrail import (
+    check_input_safety,
+    has_destructive_sql_intent,
+    is_hard_block,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +242,26 @@ def test_whitespace_only():
 def test_no_hard_block_on_sql_keywords():
     flags = check_input_safety("drop table users")
     assert is_hard_block(flags) is False
+
+
+def test_destructive_sql_intent_detected():
+    flags = check_input_safety("drop table users")
+    assert has_destructive_sql_intent(flags) is True
+
+
+def test_destructive_sql_intent_detected_for_drop_all_tables():
+    flags = check_input_safety("drop all the tables now")
+    assert has_destructive_sql_intent(flags) is True
+
+
+def test_destructive_sql_intent_detected_for_delete_all_data():
+    flags = check_input_safety("please delete all data")
+    assert has_destructive_sql_intent(flags) is True
+
+
+def test_non_destructive_sql_intent_not_detected():
+    flags = check_input_safety("Show me total revenue by category")
+    assert has_destructive_sql_intent(flags) is False
 
 
 def test_no_hard_block_on_clean_input():

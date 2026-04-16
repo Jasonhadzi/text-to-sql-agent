@@ -2,6 +2,7 @@ fastapi
 uvicorn
 gunicorn
 openai
+openai-agents
 sqlglot
 pandas
 duckdb

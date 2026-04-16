@@ -45,8 +45,10 @@ INJECTION_PATTERNS: list[str] = [
 # Soft-block patterns: suspicious SQL keywords that may be legitimate
 SUSPICIOUS_PATTERNS: list[str] = [
     r"\bdrop\s+table\b",
+    r"\bdrop\b.{0,30}\btables?\b",
     r"\bdrop\s+database\b",
     r"\bdelete\s+from\b",
+    r"\bdelete\b.{0,30}\b(?:all\s+)?(?:records?|rows?|data)\b",
     r"\btruncate\s+(?:table\s+)?\w",
     r"\binsert\s+into\b",
     r"\bupdate\s+\w+\s+set\b",
@@ -248,3 +250,29 @@ def is_hard_block(flags: list[str]) -> bool:
     "INJECTION:") as opposed to a suspicious-but-possibly-legitimate keyword.
     """
     return any(f.startswith("INJECTION:") for f in flags)
+
+
+def has_destructive_sql_intent(flags: list[str]) -> bool:
+    """Return True when input flags indicate destructive SQL intent.
+
+    These intents are blocked before any LLM call to enforce read-only behavior.
+    """
+    destructive_keywords = (
+        "drop",
+        "delete",
+        "truncate",
+        "insert",
+        "update",
+        "alter",
+        "create",
+        "grant",
+        "exec",
+        "xp_cmdshell",
+    )
+    for flag in flags:
+        normalized = flag.lower().replace("\\b", "").replace("\\s+", " ")
+        if normalized.startswith("suspicious pattern:") and any(
+            kw in normalized for kw in destructive_keywords
+        ):
+            return True
+    return False

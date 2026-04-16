@@ -11,6 +11,7 @@ import json
 from uuid import uuid4
 
 from agents import Runner
+from openai import BadRequestError
 
 from src.agents.clarification import clarification_agent
 from src.agents.query_router import query_router_agent
@@ -23,7 +24,11 @@ from src.connectors.fabric_connector import (
     get_fabric_connection,
     get_sql_dialect,
 )
-from src.guardrails.input_guardrail import check_input_safety, is_hard_block
+from src.guardrails.input_guardrail import (
+    check_input_safety,
+    has_destructive_sql_intent,
+    is_hard_block,
+)
 from src.guardrails.output_guardrail import check_output_safety, has_critical_issues
 from src.guardrails.sql_guardrail import check_sql
 from src.models.schemas import (
@@ -45,6 +50,24 @@ from src.tools.sql_execute import execute_sql
 from src.tools.sql_validate import inject_limit, validate_sql
 
 MAX_SQL_ATTEMPTS = 3
+
+
+def _is_content_filter_error(exc: Exception) -> bool:
+    """Return True when an OpenAI/Azure request is blocked by content policy."""
+    if not isinstance(exc, BadRequestError):
+        return False
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        return False
+    err = body.get("error")
+    if not isinstance(err, dict):
+        return False
+    code = str(err.get("code", "")).lower()
+    inner = err.get("innererror")
+    inner_code = ""
+    if isinstance(inner, dict):
+        inner_code = str(inner.get("code", "")).lower()
+    return code == "content_filter" or inner_code == "responsibleaipolicyviolation"
 
 
 def _warn_datasource_env_mismatch(datasource_config: dict, use_fabric: bool) -> None:
@@ -142,7 +165,7 @@ async def run_pipeline(
     safety_issues = check_input_safety(question)
     if safety_issues:
         logger.log("safety", "flagged", {"issues": safety_issues})
-        if is_hard_block(safety_issues):
+        if is_hard_block(safety_issues) or has_destructive_sql_intent(safety_issues):
             logger.log("safety", "hard_blocked", {"issues": safety_issues})
             print(f"  [BLOCKED] Hard block triggered: {safety_issues}")
             fr = FinalResponse(
@@ -165,9 +188,22 @@ async def run_pipeline(
         f"## User Question\n{question}\n\n"
         f"## Database Schema\n{schema_text}"
     )
-    clar_result = await Runner.run(
-        clarification_agent, clarification_input, run_config=run_config
-    )
+    try:
+        clar_result = await Runner.run(
+            clarification_agent, clarification_input, run_config=run_config
+        )
+    except Exception as exc:
+        if _is_content_filter_error(exc):
+            logger.log("clarification", "blocked_by_model_policy", {"error": str(exc)})
+            print("  [BLOCKED] Clarification input blocked by model content policy.")
+            fr = FinalResponse(
+                question=question,
+                answer="Your request was blocked by model safety policies. "
+                       "Please rephrase as a safe, read-only analytics question.",
+            )
+            _attach_backend_meta(fr, schema, None, USE_FABRIC)
+            return fr
+        raise
     clar: ClarificationResult = clar_result.final_output
     logger.log("clarification", "completed", clar)
 
@@ -195,9 +231,22 @@ async def run_pipeline(
         f"```json\n{json.dumps(datasource_config, indent=2)}\n```\n\n"
         f"## Available Schema\n{schema_text}"
     )
-    router_result = await Runner.run(
-        query_router_agent, router_input, run_config=run_config
-    )
+    try:
+        router_result = await Runner.run(
+            query_router_agent, router_input, run_config=run_config
+        )
+    except Exception as exc:
+        if _is_content_filter_error(exc):
+            logger.log("query_router", "blocked_by_model_policy", {"error": str(exc)})
+            print("  [BLOCKED] Routing input blocked by model content policy.")
+            fr = FinalResponse(
+                question=question,
+                answer="Your request was blocked by model safety policies. "
+                       "Please rephrase as a safe, read-only analytics question.",
+            )
+            _attach_backend_meta(fr, schema, None, USE_FABRIC)
+            return fr
+        raise
     routing: RoutingResult = router_result.final_output
     logger.log("query_router", "completed", routing)
     print(f"  Routed to tables: {routing.relevant_tables}")
@@ -225,7 +274,20 @@ async def run_pipeline(
                 f"\n\n## Previous Validation Errors — Fix These\n{errors_feedback}"
             )
 
-        nlq_result = await Runner.run(nlq_agent, nlq_input, run_config=run_config)
+        try:
+            nlq_result = await Runner.run(nlq_agent, nlq_input, run_config=run_config)
+        except Exception as exc:
+            if _is_content_filter_error(exc):
+                logger.log("nlq_agent", "blocked_by_model_policy", {"attempt": attempt, "error": str(exc)})
+                print("  [BLOCKED] SQL generation input blocked by model content policy.")
+                fr = FinalResponse(
+                    question=question,
+                    answer="Your request was blocked by model safety policies. "
+                           "Please rephrase as a safe, read-only analytics question.",
+                )
+                _attach_backend_meta(fr, schema, routing, USE_FABRIC)
+                return fr
+            raise
         sql_candidate: SQLCandidate = nlq_result.final_output
         logger.log("nlq_agent", f"attempt_{attempt}", sql_candidate)
         print(f"  SQL: {sql_candidate.sql[:120]}...")
@@ -237,9 +299,19 @@ async def run_pipeline(
         logger.log("sql_guardrail_check", f"attempt_{attempt}", sql_guard)
 
         if not sql_guard["allowed"]:
-            errors_feedback = f"- {sql_guard['reason']}"
+            logger.log(
+                "sql_guardrail_check",
+                "blocked",
+                {"attempt": attempt, "reason": sql_guard["reason"]},
+            )
             print(f"  [BLOCKED] {sql_guard['reason']}")
-            continue
+            fr = FinalResponse(
+                question=question,
+                answer="Your request was blocked by SQL safety guardrails. "
+                       "Only safe, read-only analytical queries are allowed.",
+            )
+            _attach_backend_meta(fr, schema, routing, USE_FABRIC)
+            return fr
 
         # ---- Stage 5b: SQL Guardrail — AST validation (hard gate) ----
         print(f"[Stage 5b] SQL AST validation (attempt {attempt + 1})...")
@@ -253,9 +325,19 @@ async def run_pipeline(
 
         if det_val.has_blockers:
             blocker_msgs = [i.message for i in det_val.issues if i.severity == "blocker"]
-            errors_feedback = "\n".join(f"- {m}" for m in blocker_msgs)
+            logger.log(
+                "sql_guardrail",
+                "blocked",
+                {"attempt": attempt, "issues": blocker_msgs},
+            )
             print(f"  [BLOCKED] {blocker_msgs}")
-            continue
+            fr = FinalResponse(
+                question=question,
+                answer="Your request was blocked by SQL safety validation. "
+                       "Please rephrase as a read-only analytics question.",
+            )
+            _attach_backend_meta(fr, schema, routing, USE_FABRIC)
+            return fr
 
         # Inject LIMIT if needed
         final_sql = sql_candidate.sql
@@ -319,7 +401,21 @@ async def run_pipeline(
         f"## Results Preview (first {len(preview_rows)} rows)\n"
         f"```json\n{json.dumps(preview_rows, indent=2, default=str)}\n```"
     )
-    rag_result = await Runner.run(rag_agent, rag_input, run_config=run_config)
+    try:
+        rag_result = await Runner.run(rag_agent, rag_input, run_config=run_config)
+    except Exception as exc:
+        if _is_content_filter_error(exc):
+            logger.log("rag_agent", "blocked_by_model_policy", {"error": str(exc)})
+            print("  [BLOCKED] Answer generation input blocked by model content policy.")
+            fr = FinalResponse(
+                question=question,
+                sql=validated_sql,
+                answer="Your request was blocked by model safety policies. "
+                       "Please rephrase as a safe, read-only analytics question.",
+            )
+            _attach_backend_meta(fr, schema, routing, USE_FABRIC)
+            return fr
+        raise
     final: FinalResponse = rag_result.final_output
 
     # Deterministic SQL + API metadata (DuckDB / Fabric parity)

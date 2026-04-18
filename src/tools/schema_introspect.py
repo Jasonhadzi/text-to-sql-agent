@@ -108,24 +108,38 @@ def load_csv_to_duckdb(csv_path: str) -> duckdb.DuckDBPyConnection:
       - ``retail_transactions`` — raw import via ``read_csv_auto``
       - ``retail_transactions_typed`` — view with parsed date/time columns
     """
+    # BUG-1 fix: reject paths containing SQL injection characters
+    if any(ch in csv_path for ch in ("'", ";", "--", "/*", "*/")):
+        raise ValueError(f"Invalid CSV path (contains disallowed characters): {csv_path}")
+
     conn = duckdb.connect(database=":memory:")
 
+    # BUG-1 fix: use parameterised query instead of f-string interpolation
     conn.execute(
-        f"""
-        CREATE TABLE retail_transactions AS
-        SELECT * FROM read_csv_auto('{csv_path}', header=true, ignore_errors=true)
-        """
+        "CREATE TABLE retail_transactions AS "
+        "SELECT * FROM read_csv_auto(?, header=true, ignore_errors=true)",
+        [csv_path],
     )
 
+    # BUG-10 fix: only alias Date/Time columns if they exist in the loaded table
+    existing_cols = {
+        row[0] for row in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'retail_transactions'"
+        ).fetchall()
+    }
+
+    alias_parts = []
+    if "Date" in existing_cols:
+        alias_parts.append('"Date" AS date_parsed')
+    if "Time" in existing_cols:
+        alias_parts.append('"Time" AS time_parsed')
+
+    alias_clause = ", " + ", ".join(alias_parts) if alias_parts else ""
+
     conn.execute(
-        """
-        CREATE VIEW retail_transactions_typed AS
-        SELECT
-            *,
-            "Date" AS date_parsed,
-            "Time" AS time_parsed
-        FROM retail_transactions
-        """
+        f"CREATE VIEW retail_transactions_typed AS "
+        f"SELECT *{alias_clause} FROM retail_transactions"
     )
 
     return conn
@@ -338,7 +352,7 @@ def _is_placeholder_table_list(table_metas: list[dict]) -> bool:
     """Detect if the configured table list only contains placeholders."""
     if not table_metas:
         return True
-    placeholder_names = {"replacewithfabrictable", "placeholder", ""}
+    placeholder_names = {"replacewithfabrictable", "placeholder", "", "none"}
     return all(
         str(tm.get("name", "")).lower().strip() in placeholder_names
         for tm in table_metas

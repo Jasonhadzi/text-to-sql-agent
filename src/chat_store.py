@@ -49,6 +49,8 @@ def save_chat(question: str, answer: str, sql: str) -> None:
 
 def get_recent_chats(limit: int = 20) -> List[Dict[str, Any]]:
     """Return the most recent chats, newest first."""
+    if limit <= 0:
+        return []
     conn = _get_conn()
     try:
         cur = conn.execute(

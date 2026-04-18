@@ -28,7 +28,7 @@ INJECTION_PATTERNS: list[str] = [
     r"\bignore\b.{0,40}\b(?:previous|prior|above|all)\b.{0,40}\b(?:instructions?|prompts?|rules?|directives?)\b",
     r"\bdisregard\b.{0,40}\b(?:instructions?|prompts?|rules?|context)\b",
     r"\byou\s+are\s+now\b",
-    r"\bact\s+as\b.{0,30}\b(?:a\s+)?(?:different|new|another|unrestricted)\b",
+    r"\bact\s+as\b.{0,60}\b(?:a\s+)?(?:different|new|another|unrestricted)\b",
     r"\bnew\s+(?:role|persona|instructions?|prompt)\b",
     r"\bforget\b.{0,30}\b(?:everything|all|your|previous)\b",
     r"\boverride\b.{0,40}\b(?:instructions?|rules?|settings?|system)\b",

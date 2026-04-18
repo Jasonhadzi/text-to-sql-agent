@@ -224,6 +224,7 @@ async def run_pipeline(
     # ------------------------------------------------------------------
     # Stage 3 — Query Router Agent (which tables?)
     # ------------------------------------------------------------------
+    routing: RoutingResult | None = None  # BUG-4 fix: init before stage 3
     print("[Stage 3] Query Router Agent selecting tables...")
     router_input = (
         f"## User Question\n{question}\n\n"
@@ -290,7 +291,7 @@ async def run_pipeline(
             raise
         sql_candidate: SQLCandidate = nlq_result.final_output
         logger.log("nlq_agent", f"attempt_{attempt}", sql_candidate)
-        print(f"  SQL: {sql_candidate.sql[:120]}...")
+        print(f"  SQL: {(sql_candidate.sql or '')[:120]}...")
 
         # ---- Stage 5a: SQL Guardrail — regex/allowlist check ----
         print(f"[Stage 5a] SQL Guardrail allowlist check (attempt {attempt + 1})...")

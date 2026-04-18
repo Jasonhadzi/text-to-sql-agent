@@ -193,7 +193,7 @@ def inject_limit(sql: str, limit: int = DEFAULT_LIMIT, *, dialect: str = "duckdb
         pass
     stripped = sql.strip().rstrip(";")
     if dialect == "tsql":
-        return f"{stripped}\nOFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY"
+        return f"{stripped}\nORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY"
     return f"{stripped}\nLIMIT {limit}"
 
 

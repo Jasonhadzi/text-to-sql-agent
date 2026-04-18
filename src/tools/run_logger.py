@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -12,8 +13,9 @@ class RunLogger:
     """Append-only JSONL logger that writes to ``outputs/runs/{run_id}/events.jsonl``."""
 
     def __init__(self, run_id: str, output_dir: str = "outputs/runs"):
-        self.run_id = run_id
-        self.run_dir = os.path.join(output_dir, run_id)
+        # BUG-7 fix: sanitise run_id to prevent path traversal
+        self.run_id = re.sub(r"[^a-zA-Z0-9_-]", "_", run_id)
+        self.run_dir = os.path.join(output_dir, self.run_id)
         os.makedirs(self.run_dir, exist_ok=True)
         self._log_path = os.path.join(self.run_dir, "events.jsonl")
 
@@ -33,6 +35,8 @@ class RunLogger:
 
     def save_artifact(self, name: str, content: str) -> str:
         """Write an arbitrary text artifact and return its path."""
+        # BUG-7 fix: strip path separators from artifact names
+        name = name.replace("/", "").replace("\\", "")
         path = os.path.join(self.run_dir, name)
         with open(path, "w") as f:
             f.write(content)
@@ -40,6 +44,7 @@ class RunLogger:
 
     def save_json_artifact(self, name: str, data: Any) -> str:
         """Write a JSON artifact and return its path."""
+        name = name.replace("/", "").replace("\\", "")
         path = os.path.join(self.run_dir, name)
         with open(path, "w") as f:
             json.dump(_serializable(data), f, indent=2, default=str)

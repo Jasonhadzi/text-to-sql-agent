@@ -44,13 +44,22 @@ def redact_preview(
     if not rows:
         return rows
 
-    pii_set = {c.lower() for c in (pii_columns or DEFAULT_PII_COLUMNS)}
+    # BUG-5 fix: use 'is None' so pii_columns=[] means "redact nothing";
+    # filter out non-string entries to avoid AttributeError
+    if pii_columns is None:
+        pii_set = {c.lower() for c in DEFAULT_PII_COLUMNS}
+    else:
+        pii_set = {c.lower() for c in pii_columns if isinstance(c, str)}
 
     redacted_rows: list[dict[str, Any]] = []
     for row in rows:
+        # BUG-6 fix: skip None rows
+        if row is None:
+            continue
         new_row = {}
         for key, value in row.items():
-            if key.lower() in pii_set:
+            # BUG-6 fix: skip non-string keys
+            if isinstance(key, str) and key.lower() in pii_set:
                 new_row[key] = REDACTED
             else:
                 new_row[key] = value

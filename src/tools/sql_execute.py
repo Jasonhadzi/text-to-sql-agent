@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from typing import Any
@@ -70,6 +71,9 @@ def execute_sql(
 def _safe_value(v: Any) -> Any:
     """Convert non-JSON-serializable values to strings."""
     if v is None:
+        return None
+    # BUG-9 fix: inf/nan are not valid JSON (RFC 8259)
+    if isinstance(v, float) and (math.isinf(v) or math.isnan(v)):
         return None
     if isinstance(v, (int, float, str, bool)):
         return v

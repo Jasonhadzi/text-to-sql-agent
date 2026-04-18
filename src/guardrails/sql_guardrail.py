@@ -39,7 +39,7 @@ _DESTRUCTIVE_CLAUSE_RE = re.compile(
 
 _COMMENT_RE = re.compile(r"(--|/\*|\*/)")
 
-_UNION_RE = re.compile(r"\bUNION\b", re.IGNORECASE)
+_UNION_RE = re.compile(r"\b(?:UNION|INTERSECT|EXCEPT)\b", re.IGNORECASE)
 
 # Table references after FROM or JOIN — skips subqueries that start with (
 _TABLE_REF_RE = re.compile(
@@ -145,11 +145,12 @@ def _check_comment_injection(sql: str) -> dict:
 
 
 def _check_union_injection(sql: str) -> dict:
-    """Block UNION-based injection attempts."""
-    if _UNION_RE.search(sql):
+    """Block UNION/INTERSECT/EXCEPT-based injection attempts."""
+    m = _UNION_RE.search(sql)
+    if m:
         return {
             "allowed": False,
-            "reason": "Blocked: UNION keyword detected; UNION-based injection is not permitted.",
+            "reason": f"Blocked: {m.group(0).upper()} keyword detected; set operation injection is not permitted.",
         }
     return {"allowed": True}
 
